@@ -18,33 +18,30 @@ jobs:
         with:
           node-version: '18'
 
+      - name: Configure clasp credentials
+        run: |
+          if [ -z "${{ secrets.CLASPRC_JSON }}" ]; then
+            echo "Missing CLASPRC_JSON secret; aborting."
+            exit 1
+          fi
+          mkdir -p "$HOME"
+          # If the secret looks like raw JSON (starts with '{'), write it directly. Otherwise assume base64 and decode.
+          if echo "${{ secrets.CLASPRC_JSON }}" | head -c 1 | grep -q '{'; then
+            printf "%s" "${{ secrets.CLASPRC_JSON }}" > "$HOME/.clasprc.json"
+          else
+            printf "%s" "${{ secrets.CLASPRC_JSON }}" | base64 --decode > "$HOME/.clasprc.json"
+          fi
+          chmod 600 "$HOME/.clasprc.json"
+          echo "Wrote $HOME/.clasprc.json (first 3 lines):"
+          sed -n '1,3p' "$HOME/.clasprc.json" || true
+
       - name: Install clasp
         run: npm install -g @google/clasp
 
-      - name: Restore CLASPRC to home (detect secret)
-        env:
-          CLASPRC_JSON_B64: ${{ secrets.CLASPRC_JSON_B64 }}
-          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+      - name: Validate clasp auth
         run: |
-          mkdir -p "$HOME"
-          if [ -n "$CLASPRC_JSON_B64" ]; then
-            echo "$CLASPRC_JSON_B64" | base64 --decode > "$HOME/.clasprc.json"
-            echo "Decoded CLASPRC_JSON_B64 -> ~/.clasprc.json"
-          elif [ -n "$CLASPRC_JSON" ]; then
-            echo "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-            echo "Wrote CLASPRC_JSON -> ~/.clasprc.json"
-          else
-            echo "No CLASPRC secret found (CLASPRC_JSON_B64 or CLASPRC_JSON). Aborting."
-            exit 1
-          fi
-          chmod 600 "$HOME/.clasprc.json"
-
-      - name: Debug: inspect decoded CLASPRC (keys only, safe)
-        run: |
-          echo "---- debug start ----"
-          stat --format="%n %s bytes" "$HOME/.clasprc.json" || true
-          node -e 'const fs=require("fs"); const p=process.env.HOME+"/.clasprc.json"; try{ const j=JSON.parse(fs.readFileSync(p,"utf8")); console.log("topKeys:",Object.keys(j)); if(j.tokens){ console.log("tokensKeys:",Object.keys(j.tokens)); if(j.tokens.default) console.log("tokens.default keys:",Object.keys(j.tokens.default)); } }catch(e){ console.error("PARSE_ERROR",e.message); process.exit(1)}'
-          echo "---- debug end ----"
+          # Run a harmless clasp command to validate that clasp can read the credentials
+          clasp list || true
 
       - name: Push code to Apps Script
         run: |
