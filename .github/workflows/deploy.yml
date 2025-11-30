@@ -1,0 +1,66 @@
+name: Push to Apps Script & Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install clasp
+        run: npm install -g @google/clasp
+
+      - name: Restore CLASPRC to home
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "Missing CLASPRC_JSON secret; aborting."
+            exit 1
+          fi
+          mkdir -p "$HOME"
+          echo "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+          echo "Wrote ~/.clasprc.json (masked)"
+
+      - name: Push code to Apps Script
+        run: |
+          # Ensure .clasp.json exists and has the scriptId
+          if [ ! -f .clasp.json ]; then
+            echo ".clasp.json not found. Ensure your project has .clasp.json with scriptId."
+            exit 1
+          fi
+          # Push the files to Apps Script (force to ensure CI syncs)
+          clasp push --force
+
+      - name: Create version and deploy
+        run: |
+          # Create a version and capture its numeric id
+          VERSION_OUTPUT="$(clasp version -m "CI: ${GITHUB_SHA}")"
+          echo "version output: $VERSION_OUTPUT"
+          VERSION_NUMBER="$(echo "$VERSION_OUTPUT" | awk '{print $NF}')"
+          if ! [[ "$VERSION_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Failed to parse version number: $VERSION_OUTPUT"
+            exit 1
+          fi
+          echo "Created version $VERSION_NUMBER"
+          # Deploy using the created version (update existing deployment or create a new one)
+          # If you want a named deployment, change --description accordingly.
+          clasp deploy --versionNumber "$VERSION_NUMBER" --description "CI deploy from ${GITHUB_REF}"
+
+      - name: Success notice
+        run: echo "Apps Script push, version, and deploy completed."
