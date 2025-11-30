@@ -1,0 +1,1547 @@
+<script>
+/** app_actions.html — Canon actions with targeted ST/WO panel refresh + banner toasts + button blink
+ *  Display rules: Dates = MM/dd/yyyy, Times = HH:mm (24-hour)
+ *
+ * Full script. Replaces native confirm/alert popouts with a clean HTML modal dialog.
+ * - Adds an HTML modal injected at init for alerts/confirms (askConfirm / showAlert).
+ * - Replaces all direct confirm(...) uses in this file with await askConfirm(...)
+ *   so the UI shows the consistent HTML popout you requested.
+ * - Keeps initialization deferred until window._obsiCore.state and window._obsiUX are available.
+ * - Does NOT use window.confirm/alert overrides (we avoid breaking sync behavior).
+ *
+ * Drop this file in place of your current app_actions.html.
+ */
+(function(){
+
+  // Wait for core + ux to be ready, then run init()
+  function waitForCoreAndInit(timeoutMs = 5000, intervalMs = 50){
+    const start = Date.now();
+    (function poll(){
+      if (window._obsiCore && window._obsiCore.state && window._obsiUX) {
+        try { initAppActions(); } catch (e) { console.error('app_actions init failed', e); }
+        return;
+      }
+      if (Date.now() - start > timeoutMs) {
+        // Give one last attempt then init anyway (best-effort) to avoid leaving UI inert.
+        console.warn('app_actions: core/ux not ready after wait — initializing anyway (may error)');
+        try { initAppActions(); } catch (e) { console.error('app_actions init failed', e); }
+        return;
+      }
+      setTimeout(poll, intervalMs);
+    })();
+  }
+
+  function initAppActions(){
+    const core = window._obsiCore || {};
+    const ux   = window._obsiUX  || {};
+    if(!core || !ux){
+      const e=document.getElementById('errbar');
+      if(e){
+        e.textContent='Error: Core not loaded';
+        e.className='errbar show';
+      }
+      console.error('app_actions: core or ux missing on init');
+      return;
+    }
+
+    const {
+      gas, fmtMDY, fmtHM, toISOfromDDMMYY, S2,
+      initial, state, render, applyVisibility, hydrateEntry
+    } = core;
+    const { flash, showErr, pulseOk } = ux;
+
+    // =========================================================
+    // Inject clean HTML modal used for alert + confirm
+    // =========================================================
+    (function buildHtmlModal(){
+      if (document.getElementById('app_modal_overlay')) return;
+
+      const css = `
+        #app_modal_overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.4);z-index:12000}
+        #app_modal{background:#fff;color:#111;border-radius:8px;max-width:720px;width:min(92%,720px);box-shadow:0 10px 30px rgba(0,0,0,0.35);font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+        #app_modal .hdr{padding:14px 18px;border-bottom:1px solid #eee;font-weight:600}
+        #app_modal .body{padding:18px;white-space:pre-wrap}
+        #app_modal .ft{padding:12px 14px;border-top:1px solid #eee;text-align:right}
+        #app_modal button{margin-left:8px;padding:8px 12px;border-radius:6px;border:1px solid #d0d7de;background:#f6f8fa;cursor:pointer}
+        #app_modal button.primary{background:#0b61ff;color:#fff;border-color:#0751d1}
+      `;
+      const style = document.createElement('style');
+      style.textContent = css;
+      document.head.appendChild(style);
+
+      const overlay = document.createElement('div');
+      overlay.id = 'app_modal_overlay';
+      overlay.innerHTML = `
+        <div id="app_modal" role="dialog" aria-modal="true" aria-labelledby="app_modal_title">
+          <div class="hdr" id="app_modal_title">Notice</div>
+          <div class="body" id="app_modal_body"></div>
+          <div class="ft" id="app_modal_ft">
+            <button id="app_modal_btn_cancel">Cancel</button>
+            <button id="app_modal_btn_ok" class="primary">OK</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+
+      // keyboard handling
+      overlay.addEventListener('keydown', (ev)=>{
+        if (ev.key === 'Escape') {
+          const btnCancel = document.getElementById('app_modal_btn_cancel');
+          if (btnCancel) btnCancel.click();
+        }
+        if (ev.key === 'Enter') {
+          const btnOk = document.getElementById('app_modal_btn_ok');
+          if (btnOk) btnOk.click();
+        }
+      }, true);
+    })();
+
+    // =========================================================
+    // Modal helpers (askConfirm returns Promise<boolean>, showAlert returns Promise<void>)
+    // =========================================================
+    function showModal(message, opts){
+      // opts: { title, okText, cancelText, showCancel (bool) }
+      return new Promise((resolve)=>{
+        const overlay = document.getElementById('app_modal_overlay');
+        const titleEl = document.getElementById('app_modal_title');
+        const bodyEl  = document.getElementById('app_modal_body');
+        const btnOk   = document.getElementById('app_modal_btn_ok');
+        const btnCancel = document.getElementById('app_modal_btn_cancel');
+        if(!overlay || !bodyEl || !btnOk || !btnCancel || !titleEl){
+          // fallback to native if modal missing
+          try {
+            if (opts && opts.showCancel) {
+              const ok = window.confirm(message);
+              resolve(ok);
+            } else {
+              window.alert(message);
+              resolve(true);
+            }
+            return;
+          } catch (e) {
+            resolve(false);
+            return;
+          }
+        }
+
+        titleEl.textContent = opts && opts.title ? opts.title : 'Notice';
+        bodyEl.textContent  = String(message || '');
+
+        btnOk.textContent = (opts && opts.okText) ? opts.okText : 'OK';
+        btnCancel.textContent = (opts && opts.cancelText) ? opts.cancelText : 'Cancel';
+
+        // show/hide cancel button
+        btnCancel.style.display = (opts && opts.showCancel) ? '' : 'none';
+
+        overlay.style.display = 'flex';
+        // focus
+        setTimeout(()=> { btnOk.focus(); }, 10);
+
+        function cleanup(){
+          overlay.style.display = 'none';
+          btnOk.removeEventListener('click', onOk);
+          btnCancel.removeEventListener('click', onCancel);
+        }
+
+        function onOk(evt){
+          evt && evt.preventDefault && evt.preventDefault();
+          cleanup();
+          resolve(true);
+        }
+        function onCancel(evt){
+          evt && evt.preventDefault && evt.preventDefault();
+          cleanup();
+          resolve(false);
+        }
+
+        btnOk.addEventListener('click', onOk);
+        btnCancel.addEventListener('click', onCancel);
+      });
+    }
+
+    async function askConfirm(message, title){
+      // show the modal with Cancel/OK
+      try{
+        const ok = await showModal(message, { title: title || 'Confirm', showCancel: true, okText: 'Yes', cancelText: 'No' });
+        return !!ok;
+      }catch(err){
+        console.warn('askConfirm failed, falling back to native confirm', err);
+        try { return !!window.confirm(message); } catch(e){ return false; }
+      }
+    }
+
+    async function showAlert(message, title){
+      try{
+        await showModal(message, { title: title || 'Notice', showCancel: false, okText: 'OK' });
+      }catch(err){
+        console.warn('showAlert failed, falling back to native alert', err);
+        try { window.alert(message); } catch(e){ /* ignore */ }
+      }
+    }
+
+    // =========================================================
+    // Helper: button "blink" / visual acknowledgment
+    // =========================================================
+    function blinkButton(btn){
+      if(!btn) return;
+      try{
+        btn.style.transition = '0.15s ease';
+        btn.style.boxShadow = '0 0 0 3px rgba(37,99,235,0.45)';
+        btn.style.transform = 'scale(1.03)';
+        setTimeout(function(){
+          btn.style.boxShadow = '0 0 0 0 rgba(0,0,0,0)';
+          btn.style.transform = 'scale(1.0)';
+        }, 900);
+      }catch(e){ /* swallow styling errors */ }
+    }
+
+    // =========================================================
+    // Unified toast helper: prefer banner toast, fallback to flash
+    // =========================================================
+    function showToast(message, isError){
+      if (window.showAppToast) {
+        window.showAppToast(message, !!isError);
+      } else {
+        flash(message);
+      }
+    }
+
+    // =========================================================
+    // Safe local refresh helper (used instead of forcing a browser reload)
+    // =========================================================
+    function safeLocalRefresh(){
+      try{
+        if(typeof render === 'function') render();
+        if(typeof applyVisibility === 'function') applyVisibility();
+        const coreNow = window._obsiCore || {};
+        try{
+          if (coreNow && typeof coreNow.paintWoDetail === 'function' && coreNow.state && coreNow.state.link && coreNow.state.link.woId) {
+            const wobj = (initial.workorders||[]).find(x=>S2(x.WorkOrderID) === S2(coreNow.state.link.woId));
+            if (wobj) coreNow.paintWoDetail(wobj);
+          }
+        }catch(e){ console.warn('paintWoDetail fallback failed', e); }
+        try{
+          if (coreNow && typeof coreNow.paintTkDetail === 'function' && coreNow.state && coreNow.state.link && coreNow.state.link.ticketId) {
+            const tobj = (initial.tickets||[]).find(x=>S2(x.TicketID) === S2(coreNow.state.link.ticketId));
+            if (tobj) coreNow.paintTkDetail(tobj);
+          }
+        }catch(e){ console.warn('paintTkDetail fallback failed', e); }
+      }catch(err){
+        console.warn('safeLocalRefresh failed', err);
+      }
+    }
+
+    // =========================================================
+    // ATOMIC REFRESH RUNNER (safe fallback)
+    // =========================================================
+    let __atomicBusy = false;
+    let __refreshSeq = 0;
+
+    async function atomic(label, fn){
+      if(__atomicBusy) return;
+      __atomicBusy = true;
+      const mySeq = ++__refreshSeq;
+      try{
+        const res = await fn();
+
+        if (mySeq === __refreshSeq){
+          const coreNow = window._obsiCore || {};
+          const rf = coreNow.fullRefreshAndRepaint;
+
+          if (typeof rf === 'function') {
+            try {
+              console.log('[atomic] calling fullRefreshAndRepaint');
+              await rf();
+            } catch (e) {
+              console.error('[atomic] fullRefreshAndRepaint failed; falling back to local repaint:', e);
+              safeLocalRefresh();
+            }
+          } else {
+            console.warn('[atomic] no fullRefreshAndRepaint; performing local repaint');
+            safeLocalRefresh();
+          }
+        }
+
+        if(label){
+          showToast(label, false);
+        }
+        return res;
+      } catch (ex){
+        showErr(ex);
+        showToast(ex && ex.message ? ex.message : 'Action failed', true);
+        throw ex;
+      } finally {
+        __atomicBusy = false;
+      }
+    }
+
+    // =========================================================
+    // Targeted ST panel refresh helper (kept for ST delete)
+    // =========================================================
+    async function refreshTicketDetailPanel(ticketId, label){
+      const tid = S2(ticketId).trim();
+      if(!tid) return;
+
+      try{
+        console.log('[refreshTicketDetailPanel] ticketId=', tid);
+        const detail = await gas('getTicketDetail', tid);
+
+        if(!detail || !detail.ok){
+          console.warn('[refreshTicketDetailPanel] getTicketDetail not ok; falling back to fullRefreshAndRepaint', detail);
+          const coreNow = window._obsiCore || {};
+          if (coreNow && typeof coreNow.fullRefreshAndRepaint === 'function') {
+            try {
+              await coreNow.fullRefreshAndRepaint();
+              if (label) showToast(label, false);
+            } catch (e) {
+              console.warn('[refreshTicketDetailPanel] fullRefresh failed; doing local repaint', e);
+              safeLocalRefresh();
+              if (label) showToast(label, false);
+            }
+          } else {
+            console.warn('[refreshTicketDetailPanel] fullRefreshAndRepaint not available, using local repaint');
+            safeLocalRefresh();
+            if (label) showToast(label, false);
+          }
+          return;
+        }
+
+        const t = detail.ticket;
+        const records = detail.records || [];
+
+        const existing = Array.isArray(initial.supportRecords) ? initial.supportRecords : [];
+        const filtered = existing.filter(r => S2(r.TicketID) !== tid);
+        initial.supportRecords = filtered.concat(records);
+
+        if (Array.isArray(initial.tickets)) {
+          const idx = initial.tickets.findIndex(x => S2(x.TicketID) === tid);
+          if (idx >= 0) {
+            initial.tickets[idx] = t;
+          }
+        }
+
+        if (!state.link.ticketId) {
+          state.link.ticketId = tid;
+        }
+        state.focus = { ticketId: tid, from: (state.focus && state.focus.from) || 'ST' };
+
+        render();
+        applyVisibility();
+
+        if(label){
+          showToast(label, false);
+        }
+      }catch(err){
+        console.error('[refreshTicketDetailPanel] failed', err);
+        showErr(err);
+        showToast(err && err.message ? err.message : 'Panel refresh failed', true);
+      }
+    }
+
+    // =========================================================
+    // Helpers
+    // =========================================================
+    const todayISO = ()=> {
+      const d=new Date();
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    };
+    const nowHM = ()=> {
+      const d=new Date();
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    };
+
+    function calcTotalHM(start, end){
+      if(!start || !end) return '';
+      const sm = parseInt(start.slice(0,2))*60 + parseInt(start.slice(3,5));
+      const em = parseInt(end.slice(0,2))*60 + parseInt(end.slice(3,5));
+      let m = em - sm;
+      if(m < 0) m += 1440;
+      return `${String((m/60)|0).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
+    }
+
+    // Safe ISO→local Date (YYYY-MM-DD) to avoid UTC drift
+    function safeISOToLocalDate(iso){
+      const s = S2(iso);
+      if(!s) return null;
+      const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if(m){
+        const Y = +m[1], M = +m[2], D = +m[3];
+        // Noon local to avoid DST/UTC edge weirdness
+        return new Date(Y, M - 1, D, 12, 0, 0, 0);
+      }
+      const d = new Date(s);
+      return isNaN(d) ? null : d;
+    }
+
+    // =========================================================
+    // Record Add/Edit dialog
+    // =========================================================
+    const dlgRec   = document.getElementById('dlgRecord'),
+          recTitle = document.getElementById('dlgRec_title'),
+          recEng   = document.getElementById('dlgRec_engineer'),
+          recStart = document.getElementById('dlgRec_start'),
+          recEnd   = document.getElementById('dlgRec_end'),
+          recPerf  = document.getElementById('dlgRec_perf'),
+          recNote  = document.getElementById('dlgRec_note'),
+          recTotal = document.getElementById('dlgRec_total');
+
+    function timePreview(s,e){
+      const tt = calcTotalHM(s,e);
+      return tt ? `TotalTime (hh:mm): ${tt}` : '';
+    }
+
+    function openRecordDialog(type, mode, recObj){
+      recEng.innerHTML = '<option value="">— Engineer —</option>' + (initial.engineers||[])
+        .map(e=>`<option value="${S2(e.EngineerID)}">${S2(e.EngineerName)}</option>`).join('');
+
+      if(mode==='edit' && recObj){
+        recTitle.textContent = (type==='ST'?'Edit Support Ticket Record':'Edit Work Order Record');
+        recEng.value   = S2(recObj.EngineerID);
+        recStart.value = S2(recObj.StartTime);
+        recEnd  .value = S2(recObj.EndTime);
+        const iso = toISOfromDDMMYY(S2(recObj.PerFdate||recObj.PerfDate)) || todayISO();
+        recPerf.value  = iso;
+        recNote.value  = S2(recObj.SupportProvided||recObj.WorkPerformed);
+      } else {
+        recTitle.textContent = (type==='ST'?'Add Support Ticket Record':'Add Work Order Record');
+        recEng.value   = '';
+        recStart.value = nowHM();
+        recEnd  .value = '';
+        recPerf .value = todayISO();
+        recNote .value = '';
+      }
+
+      recTotal.textContent = timePreview(recStart.value, recEnd.value);
+      recStart.oninput = recEnd.oninput = ()=> {
+        recTotal.textContent = timePreview(recStart.value, recEnd.value);
+      };
+
+      try{ dlgRec.showModal(); }catch(_){ dlgRec.open=true; }
+    }
+    core.openRecordDialog = openRecordDialog;
+
+    document.getElementById('dlgRec_cancel').onclick = (e)=>{
+      e.preventDefault();
+      blinkButton(e.currentTarget);
+      try{ dlgRec.close(); }catch(_){ dlgRec.open=false; }
+      showToast('Record edit cancelled', false);
+    };
+
+    document.getElementById('dlgRec_save').onclick = async (e)=>{
+      e.preventDefault();
+      try{
+        const eid  = S2(recEng.value);
+        const note = S2(recNote.value).trim();
+        const st   = S2(recStart.value);
+        const en   = S2(recEnd.value);
+        const perf = S2(recPerf.value)||todayISO();
+        if(!note) throw new Error('Enter a note.');
+        const isEdit = recTitle.textContent.startsWith('Edit');
+        const ctx = state.link.woId ? 'WO' : (state.link.ticketId ? 'ST' : '');
+
+        // ====== ST PATH: fully local atomic update ======
+        if (ctx === 'ST') {
+          if(!state.link.ticketId) throw new Error('Select a Ticket first');
+
+          const tid = S2(state.link.ticketId);
+
+          if(isEdit){
+            if(!state.selSTRecTS) throw new Error('Select a Ticket record');
+            const rec=(initial.supportRecords||[]).find(
+              r=>S2(r.TicketID)===tid && S2(r.Timestamp)===state.selSTRecTS
+            );
+            if(!rec) throw new Error('Ticket record not found');
+            await gas('updateSupportRecord', rec.Timestamp, eid, note, st, en, perf);
+          } else {
+            await gas('addSupportRecord', tid, eid, note, st, en, perf);
+          }
+
+          const now = new Date();
+          const totalHM = calcTotalHM(st, en);
+
+          if (!Array.isArray(initial.supportRecords)) {
+            initial.supportRecords = [];
+          }
+
+          if (isEdit) {
+            const rec = initial.supportRecords.find(
+              r=>S2(r.TicketID)===tid && S2(r.Timestamp)===state.selSTRecTS
+            );
+            if (rec) {
+              const eng = (initial.engineers||[]).find(e=>S2(e.EngineerID)===eid);
+              rec.EngineerID       = eid;
+              rec.EngineerName     = eng ? S2(eng.EngineerName || eng.EngineerID) : rec.EngineerName || '';
+              rec.SupportProvided  = note;
+              rec.StartTime        = st;
+              rec.EndTime          = en;
+              rec.TotalTime        = totalHM;
+              rec.PerFdate         = perf;
+              rec.Status           = 'IN PROGRESS';
+              rec.Timestamp        = rec.Timestamp || now;
+            }
+          } else {
+            const eng = (initial.engineers||[]).find(e=>S2(e.EngineerID)===eid);
+            const engName = eng ? S2(eng.EngineerName || eng.EngineerID) : '';
+            initial.supportRecords.push({
+              Timestamp      : now,
+              TicketID       : tid,
+              EngineerID     : eid,
+              EngineerName   : engName,
+              SupportProvided: note,
+              StartTime      : st,
+              EndTime        : en,
+              TotalTime      : totalHM,
+              PerFdate       : perf,
+              EmailSent      : '',
+              Status         : 'IN PROGRESS'
+            });
+          }
+
+          if (Array.isArray(initial.tickets)) {
+            const t = initial.tickets.find(x=>S2(x.TicketID)===tid);
+            if (t) {
+              t.Status     = 'IN PROGRESS';
+              t.LastUpdate = now;
+            }
+          }
+
+          state.selSTRecTS = '';
+          state.link.ticketId = tid;
+          state.focus = { ticketId: tid, from: 'ST' };
+
+          render();
+          applyVisibility();
+          showToast(isEdit ? 'Record updated' : 'Record added', false);
+
+          blinkButton(e.currentTarget);
+          try{ dlgRec.close(); }catch(_){ dlgRec.open=false; }
+          return;
+        }
+
+        // ====== WO PATH: fully local atomic update (EDIT only) ======
+        if (ctx === 'WO') {
+          if(!state.link.woId) throw new Error('Select a Work Order first');
+          const woId = S2(state.link.woId);
+          const tid  = S2(state.link.ticketId || '');
+          const now  = new Date();
+          const totalHM = calcTotalHM(st, en);
+
+          if (!Array.isArray(initial.workOrderRecords)) {
+            initial.workOrderRecords = [];
+          }
+
+          if (isEdit) {
+            if(!state.selWORecID) throw new Error('Select a Work Order record');
+            const wrid = S2(state.selWORecID);
+            const recLocal = initial.workOrderRecords.find(r => S2(r.WorkRecordID) === wrid);
+            if(!recLocal) throw new Error('Work Order record not found');
+
+            await gas('updateWorkOrderRecord', wrid, eid, note, st, en, perf);
+
+            const eng = (initial.engineers || []).find(e => S2(e.EngineerID) === eid);
+            recLocal.EngineerID    = eid;
+            recLocal.EngineerName  = eng ? S2(eng.EngineerName || eng.EngineerID) : recLocal.EngineerName || '';
+            recLocal.WorkPerformed = note;
+            recLocal.StartTime     = st;
+            recLocal.EndTime       = en;
+            recLocal.TotalTime     = totalHM;
+            recLocal.PerfDate      = perf;
+            recLocal.Timestamp     = recLocal.Timestamp || now;
+            recLocal.Status        = recLocal.Status || '';
+
+            showToast('Work record updated', false);
+          } else {
+            // IMPORTANT: adding new WO records via dlgRecord has been removed.
+            throw new Error('Adding Work Order records via this modal has been disabled. Use the Add Task flow instead.');
+          }
+
+          if (Array.isArray(initial.workorders)) {
+            const w = initial.workorders.find(x => S2(x.WorkOrderID) === woId);
+            if (w) w.LastUpdate = now;
+          }
+
+          state.link.woId  = woId;
+          state.selWORecID = '';
+          state.focus      = { ticketId: tid, from: 'WO' };
+
+          render();
+          applyVisibility();
+
+          blinkButton(e.currentTarget);
+          try{ dlgRec.close(); }catch(_){ dlgRec.open=false; }
+          return;
+        }
+
+        throw new Error('Select a Ticket or Work Order');
+      }catch(ex){ showErr(ex); }
+    };
+
+    // =========================================================
+    // Assign / Schedule dialog (local atomic)
+    // =========================================================
+    const dlg         = document.getElementById('dlgAssign'),
+          rowEngineer = document.getElementById('rowEngineer'),
+          rowDate     = document.getElementById('rowDate'),
+          engSel      = document.getElementById('dlgAssignEngineer'),
+          dateInput   = document.getElementById('dlgAssignDate');
+
+    function openAssignModal(mode){
+      if(!state.link.woId){ showErr('Select a Work Order first'); return; }
+      if(mode==='assign'){
+        engSel.innerHTML = '<option value="">— Engineer —</option>' + (initial.engineers||[])
+          .map(e=>`<option value="${S2(e.EngineerID)}">${S2(e.EngineerName)}</option>`).join('');
+        const w=(initial.workorders||[]).find(x=>S2(x.WorkOrderID)===state.link.woId)||{};
+        if(S2(w.EngineerID)) engSel.value=S2(w.EngineerID);
+        rowEngineer.style.display='flex'; rowDate.style.display='none';
+      } else {
+        const w=(initial.workorders||[]).find(x=>S2(x.WorkOrderID)===state.link.woId)||{};
+        let iso='';
+        if(w.ScheduledDate && !isNaN(Date.parse(w.ScheduledDate))) {
+          iso=new Date(w.ScheduledDate).toISOString().slice(0,10);
+        }
+        dateInput.value=iso||todayISO();
+        rowEngineer.style.display='none'; rowDate.style.display='flex';
+      }
+      try{ dlg.showModal(); }catch(_){ dlg.open=true; }
+    }
+    window.openAssignModal = openAssignModal;
+
+    document.getElementById('dlgAssign_action').onclick = async (e)=>{
+      e.preventDefault();
+      try{
+        if(!state.link.woId) throw new Error('Select a Work Order first');
+        const woId = S2(state.link.woId);
+        const assigning = (rowEngineer.style.display !== 'none');
+
+        const w = (initial.workorders || []).find(x => S2(x.WorkOrderID) === woId);
+        if (!w) throw new Error('Work Order not found in current view');
+
+        const now = new Date();
+
+        if (assigning) {
+          // ASSIGN PATH
+          const engId = S2(engSel.value);
+          if (!engId) throw new Error('Pick an engineer.');
+
+          await gas('assignWorkOrder', woId, engId);
+
+          const eng = (initial.engineers || []).find(e => S2(e.EngineerID) === engId);
+          w.EngineerID   = engId;
+          w.EngineerName = eng ? S2(eng.EngineerName || eng.EngineerID) : (w.EngineerName || '');
+          w.LastUpdate   = now;
+
+          showToast('Assigned to ' + (w.EngineerName || engId), false);
+        } else {
+          // SCHEDULE PATH (timezone-safe local parse)
+          const iso = S2(dateInput.value);
+          if (!iso) throw new Error('Pick a date.');
+
+          await gas('setWorkOrderScheduledDate', woId, iso);
+
+          const dateObj = safeISOToLocalDate(iso);
+          w.ScheduledDate = dateObj || iso;
+          w.Status        = 'SCHEDULED';
+          w.LastUpdate    = now;
+
+          showToast('Scheduled for ' + iso, false);
+        }
+
+        // Keep selection focused on this WO
+        state.link.woId   = woId;
+        state.selWORecID  = '';
+        state.focus       = { ticketId: S2(w.TicketID || state.link.ticketId || ''), from: 'WO' };
+
+        render();
+        applyVisibility();
+
+        blinkButton(e.currentTarget);
+        try{ dlg.close(); }catch(_){ dlg.open=false; }
+      }catch(ex){
+        showErr(ex);
+        showToast(ex && ex.message ? ex.message : 'Assign/Schedule failed', true);
+      }
+    };
+
+    // =========================================================
+    // Email Engineer (extras) — non-atomic
+    // =========================================================
+    const dlgEmailEng = document.getElementById('dlgEmailEng'),
+          engExtras   = document.getElementById('engExtras');
+
+    document.getElementById('btnEmailEngineer').onclick = async (e)=>{
+      e.preventDefault();
+      if(!state.link.woId) return showErr('Select a Work Order first');
+      try{
+        const w=(initial.workorders||[]).find(x=>S2(x.WorkOrderID)===state.link.woId);
+        const exId = w ? S2(w.EngineerID) : '';
+        const list = await gas('getEngineersPicker', exId);
+        engExtras.innerHTML = list.length
+          ? list.map(x=>`<label style="display:block;margin:4px 0;">
+              <input type="checkbox" value="${S2(x.EngineerID)}"> ${S2(x.EngineerName)}
+              <span class="meta">${S2(x.Email)}</span>
+            </label>`).join('')
+          : '<div class="meta">No other engineers available.</div>';
+        blinkButton(e.currentTarget);
+        showToast('Select engineers to email', false);
+        try{ dlgEmailEng.showModal(); }catch(_){ dlgEmailEng.open=true; }
+      }catch(ex){ showErr(ex); }
+    };
+
+    document.getElementById('dlgEmailEng_cancel').onclick = (e)=>{
+      e.preventDefault();
+      blinkButton(e.currentTarget);
+      try{ dlgEmailEng.close(); }catch(_){ dlgEmailEng.open=false; }
+      showToast('Engineer email cancelled', false);
+    };
+
+    document.getElementById('dlgEmailEng_send').onclick = async (e)=>{
+      e.preventDefault();
+      if(!state.link.woId) return showErr('Select a Work Order first');
+      const picks = Array.from(engExtras.querySelectorAll('input[type="checkbox"]:checked')).map(x=>x.value);
+      try{
+        await gas('sendEngineerEmailWithExtras', state.link.woId, picks);
+        showToast('Engineer email sent', false);
+        blinkButton(e.currentTarget);
+        try{ dlgEmailEng.close(); }catch(_){ dlgEmailEng.open=false; }
+      }catch(ex){
+        showErr(ex);
+        showToast(ex && ex.message ? ex.message : 'Engineer email failed', true);
+      }
+    };
+
+    // =========================================================
+    // Itinerary dialog — non-atomic
+    // =========================================================
+    const dlgItin      = document.getElementById('dlgItinerary'),
+          itinEng      = document.getElementById('itinEngineer'),
+          itinStart    = document.getElementById('itinStart'),
+          itinEnd      = document.getElementById('itinEnd'),
+          itinTo       = document.getElementById('itinTo'),
+          itinCc       = document.getElementById('itinCc'),
+          itinBcc      = document.getElementById('itinBcc'),
+          itinExtrasDiv= document.getElementById('itinExtras');
+
+    function prepItin(engs){
+      itinEng.innerHTML = '<option value="">— Engineer —</option>' +
+        engs.map(e=>`<option value="${S2(e.EngineerID)}" data-email="${S2(e.Email)}">${S2(e.EngineerName)}</option>`).join('');
+      const iso=todayISO();
+      itinStart.value=iso;
+      itinEnd.value=iso;
+      itinTo.value='';
+      itinCc.value='';
+      itinBcc.value='';
+      itinExtrasDiv.innerHTML='<div class="meta">Select an engineer above to load the extra picks…</div>';
+      try{ dlgItin.showModal(); }catch(_){ dlgItin.open=true; }
+    }
+
+    document.getElementById('btnEmailItinerary').onclick = async (e)=>{
+      e.preventDefault();
+      try{
+        const engs=await gas('getItineraryEngineers');
+        blinkButton(e.currentTarget);
+        showToast('Prepare itinerary email', false);
+        prepItin(engs);
+      }catch(ex){ showErr(ex); }
+    };
+
+    document.getElementById('dlgItin_cancel').onclick = (e)=>{
+      e.preventDefault();
+      blinkButton(e.currentTarget);
+      try{ dlgItin.close(); }catch(_){ dlgItin.open=false; }
+      showToast('Itinerary email cancelled', false);
+    };
+
+    itinEng.onchange = async ()=>{
+      const toId    = S2(itinEng.value);
+      const toEmail = itinEng.options[itinEng.selectedIndex]?.getAttribute('data-email')||'';
+      if(toEmail && !itinTo.value) itinTo.value=toEmail;
+      try{
+        const list = await gas('getEngineersPicker', toId);
+        itinExtrasDiv.innerHTML = list.length
+          ? list.map(e=>`<label style="display:block;margin:4px 0;">
+              <input type="checkbox" value="${S2(e.EngineerID)}"> ${S2(e.EngineerName)}
+              <span class="meta">${S2(e.Email)}</span></label>`).join('')
+          : '<div class="meta">No other engineers available.</div>';
+      }catch(ex){ showErr(ex); }
+    };
+
+    document.getElementById('dlgItin_send').onclick = async (e)=>{
+      e.preventDefault();
+      try{
+        if(!itinEng.value)           throw new Error('Pick an engineer.');
+        if(!itinStart.value || !itinEnd.value) throw new Error('Pick a start and end date.');
+        if(!itinTo.value)            throw new Error('Enter a recipient email.');
+
+        const extra = Array.from(itinExtrasDiv.querySelectorAll('input[type="checkbox"]:checked')).map(x=>x.value);
+        await gas('emailEngineerItinerary', {
+          engineerId:      itinEng.value,
+          startDateISO:    itinStart.value,
+          endDateISO:      itinEnd.value,
+          toEmail:         S2(itinTo.value),
+          ccEmail:         S2(itinCc.value)||null,
+          bccEmail:        S2(itinBcc.value)||null,
+          extraEngineerIds: extra
+        });
+        showToast('Itinerary sent', false);
+        blinkButton(e.currentTarget);
+        try{ dlgItin.close(); }catch(_){ dlgItin.open=false; }
+      }catch(ex){
+        showErr(ex);
+        showToast(ex && ex.message ? ex.message : 'Itinerary send failed', true);
+      }
+    };
+
+    // =========================================================
+    // Support Ticket toolbar
+    // =========================================================
+    document.getElementById('btnEditT').onclick = (e)=>{
+      e.preventDefault();
+      if(!state.link.ticketId) return showErr('Select a Ticket first');
+      state.editT=true;
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Ticket edit mode', false);
+      render();
+      applyVisibility();
+    };
+
+    // ===== INLINE/TOOLBAR Ticket text save — local atomic =====
+    async function saveTicketTextLocal(triggerEl){
+      if(!state.link.ticketId) throw new Error('No Ticket selected');
+      const tid = S2(state.link.ticketId);
+      const ta  = document.getElementById('tEdit');
+      const txt = ta ? ta.value||'' : '';
+
+      await gas('updateTicketText', tid, txt);
+
+      const now = new Date();
+
+      if (Array.isArray(initial.tickets)) {
+        const t = initial.tickets.find(x => S2(x.TicketID) === tid);
+        if (t) {
+          t.SupportRequest = txt;
+          t.LastUpdate     = now;
+        }
+      }
+
+      state.editT = false;
+      render();
+      applyVisibility();
+      showToast('Ticket text saved', false);
+      if (triggerEl) blinkButton(triggerEl);
+    }
+
+    document.getElementById('btnSaveT').onclick = async (e)=>{
+      e.preventDefault();
+      try{
+        await saveTicketTextLocal(e.currentTarget);
+      }catch(ex){ showErr(ex); }
+    };
+
+    document.getElementById('btnAddSTModal').onclick = (e)=>{
+      e.preventDefault();
+      if(!state.link.ticketId) return showErr('Select a Ticket first');
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Add support record', false);
+      core.openRecordDialog('ST','add');
+    };
+
+    document.getElementById('btnEditSTRec').onclick = (e)=>{
+      e.preventDefault();
+      if(!state.link.ticketId) return showErr('Select a Ticket first');
+      if(!state.selSTRecTS)    return showErr('Select a Ticket record');
+      const rec=(initial.supportRecords||[]).find(r=>S2(r.TicketID)===state.link.ticketId && S2(r.Timestamp)===state.selSTRecTS);
+      if(!rec) return showErr('Record not found');
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Edit support record', false);
+      core.openRecordDialog('ST','edit',rec);
+    };
+
+    document.getElementById('btnDeleteSTRec').onclick = async (e)=>{
+      e.preventDefault();
+      if(!state.selSTRecTS) return showErr('Select a Ticket record');
+      if(!state.link.ticketId) return showErr('Select a Ticket first');
+      const ok = await askConfirm('Delete this Ticket record and mark it as DELETED? Are you sure?', 'Delete Ticket Record');
+      if(!ok) return;
+      try{
+        await gas('deleteSupportRecord', state.selSTRecTS);
+        state.selSTRecTS = '';
+        await refreshTicketDetailPanel(state.link.ticketId, 'Support record deleted');
+        blinkButton(e.currentTarget);
+      }catch(ex){
+        showErr(ex);
+        showToast(ex && ex.message ? ex.message : 'Delete failed', true);
+      }
+    };
+
+    // ===== Escalate: Ticket → Work Order (local atomic) =====
+    document.getElementById('btnEscalate').onclick = async (e)=>{
+      e.preventDefault();
+      try{
+        const ticketId = S2(state.link.ticketId);
+        if (!ticketId) throw new Error('Select a Ticket first');
+
+        const t = (initial.tickets || []).find(x => S2(x.TicketID) === ticketId);
+        if (!t) throw new Error('Ticket not found in current view');
+
+        const res = await gas('promoteTicketToWorkOrder', ticketId);
+        console.log('[Escalate] RPC result:', res);
+        const woId = res && (res.WorkOrderID || res.workOrderId || res.woId);
+        if (!woId) {
+          showToast('Work order created, but ID not returned', false);
+          blinkButton(e.currentTarget);
+          return;
+        }
+        const wid = S2(woId);
+        console.log('[Escalate] New WorkOrderID from RPC:', wid);
+
+        const now = new Date();
+        const newWO = {
+          Timestamp    : now,
+          WorkOrderID  : wid,
+          TicketID     : t.TicketID,
+          ClientID     : t.ClientID,
+          ClientName   : t.ClientName,
+          MarketID     : t.MarketID,
+          MarketName   : t.MarketName,
+          CallSign     : S2(t.CallSign || '').toUpperCase(),
+          EngineerID   : '',
+          EngineerName : '',
+          WorkOrderText: S2(t.SupportRequest || ''),
+          Time         : now,
+          Status       : 'New',
+          ScheduledDate: '',
+          EmailSent    : '',
+          LastUpdate   : now
+        };
+
+        if (!Array.isArray(initial.workorders)) {
+          initial.workorders = [];
+        }
+        initial.workorders = initial.workorders.filter(w => S2(w.WorkOrderID) !== wid);
+        initial.workorders.push(newWO);
+
+        t.Status     = 'ESCALATED';
+        t.LastUpdate = now;
+
+        state.link.ticketId = ticketId;
+        state.link.woId     = wid;
+        state.selSTRecTS    = '';
+        state.selWORecID    = '';
+        state.focus         = { ticketId, from: 'WO' };
+
+        render();
+        applyVisibility();
+        showToast('Work order created: ' + wid, false);
+        blinkButton(e.currentTarget);
+      }catch(ex){
+        showErr(ex);
+        showToast(ex && ex.message ? ex.message : 'Escalate failed', true);
+      }
+    };
+
+    // ===== Ticket Pending — local atomic update =====
+    document.getElementById('btnPendingT').onclick = (e)=>{
+      e.preventDefault();
+      (async ()=>{
+        try{
+          if(!state.link.ticketId) { showErr('Select a Ticket first'); return; }
+          const tid = S2(state.link.ticketId);
+
+          await gas('setTicketPending', tid);
+
+          const now = new Date();
+          if (Array.isArray(initial.tickets)) {
+            const t = initial.tickets.find(x => S2(x.TicketID) === tid);
+            if (t) {
+              t.Status     = 'PENDING';
+              t.LastUpdate = now;
+            }
+          }
+
+          render();
+          applyVisibility();
+
+          showToast('Ticket marked Pending', false);
+          blinkButton(e.currentTarget);
+        }catch(ex){
+          showErr(ex);
+          showToast(ex && ex.message ? ex.message : 'Set Pending failed', true);
+        }
+      })();
+    };
+
+    // ===== CLOSE TICKET — local atomic update =====
+    document.getElementById('btnCloseT').onclick = (e)=>{
+      e.preventDefault();
+      (async ()=>{
+        try{
+          if(!state.link.ticketId) { showErr('Select a Ticket first'); return; }
+          const ok = await askConfirm('Close this Ticket?', 'Close Ticket');
+          if(!ok) return;
+
+          const tid = S2(state.link.ticketId);
+
+          await gas('closeTicket', tid);
+
+          const now = new Date();
+
+          if (Array.isArray(initial.tickets)) {
+            const t = initial.tickets.find(x => S2(x.TicketID) === tid);
+            if (t) {
+              t.Status     = 'CLOSED';
+              t.LastUpdate = now;
+            }
+          }
+
+          state.link.ticketId = '';
+          state.selSTRecTS    = '';
+          state.focus         = null;
+          state.editT         = false;
+
+          const ticketsRec = document.getElementById('ticketsRec');
+          if (ticketsRec) {
+            ticketsRec.innerHTML = '<span class="meta">Ticket records will appear here…</span>';
+          }
+
+          render();
+          applyVisibility();
+
+          showToast('Ticket closed', false);
+          blinkButton(e.currentTarget);
+        }catch(ex){
+          showErr(ex);
+          showToast(ex && ex.message ? ex.message : 'Close Ticket failed', true);
+        }
+      })();
+    };
+
+    // ===== Delete Ticket — local atomic update =====
+    document.getElementById('btnDeleteT').onclick = (e)=>{
+      e.preventDefault();
+      (async ()=>{
+        try{
+          if(!state.link.ticketId) { showErr('Select a Ticket first'); return; }
+          const ok = await askConfirm('Deleting this will delete this Ticket and all linked records. Are you sure?', 'Delete Ticket');
+          if(!ok) return;
+
+          const tid = S2(state.link.ticketId);
+
+          await gas('softDeleteTicket', tid);
+
+          if (Array.isArray(initial.tickets)) {
+            initial.tickets = initial.tickets.filter(t => S2(t.TicketID) !== tid);
+          }
+          if (Array.isArray(initial.supportRecords)) {
+            initial.supportRecords = initial.supportRecords.filter(r => S2(r.TicketID) !== tid);
+          }
+
+          state.link.ticketId = '';
+          state.selSTRecTS    = '';
+          state.focus         = null;
+          state.editT         = false;
+
+          const ticketsRec = document.getElementById('ticketsRec');
+          if (ticketsRec) {
+            ticketsRec.innerHTML = '<span class="meta">Ticket records will appear here…</span>';
+          }
+
+          render();
+          applyVisibility();
+
+          showToast('Ticket deleted', false);
+          blinkButton(e.currentTarget);
+        }catch(ex){
+          showErr(ex);
+          showToast(ex && ex.message ? ex.message : 'Delete Ticket failed', true);
+        }
+      })();
+    };
+
+    document.getElementById('btnClearST').onclick = (e)=>{
+      e.preventDefault();
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Ticket selection cleared', false);
+      state.link.ticketId='';
+      state.selSTRecTS='';
+      state.focus=null;
+      state.editT=false;
+      document.getElementById('ticketsRec').innerHTML='<span class="meta">Ticket records will appear here…</span>';
+      render();
+      applyVisibility();
+    };
+
+    // =========================================================
+    // Work Order toolbar
+    // =========================================================
+    document.getElementById('btnEditW').onclick = (e)=>{
+      e.preventDefault();
+      if(!state.link.woId) return showErr('Select a Work Order first');
+      state.editW=true;
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Work order edit mode', false);
+      render();
+      applyVisibility();
+    };
+
+    // ===== INLINE/TOOLBAR WO text save — local atomic =====
+    async function saveWorkOrderTextLocal(triggerEl){
+      if(!state.link.woId) throw new Error('No Work Order selected');
+      const woId = S2(state.link.woId);
+      const ta   = document.getElementById('wEdit');
+      const txt  = ta ? ta.value||'' : '';
+
+      await gas('updateWorkOrderText', woId, txt);
+
+      const now = new Date();
+
+      if (Array.isArray(initial.workorders)) {
+        const w = initial.workorders.find(x => S2(x.WorkOrderID) === woId);
+        if (w) {
+          w.WorkOrderText = txt;
+          w.LastUpdate    = now;
+        }
+      }
+
+      state.editW = false;
+      render();
+      applyVisibility();
+      showToast('Work order text saved', false);
+      if (triggerEl) blinkButton(triggerEl);
+    }
+
+    document.getElementById('btnSaveW').onclick = async (e)=>{
+      e.preventDefault();
+      try{
+        await saveWorkOrderTextLocal(e.currentTarget);
+      }catch(ex){ showErr(ex); }
+    };
+
+    // ---- CHANGE: Remove Add Work Order Record modal usage ----
+    // btnAddWOModal no longer opens dlgRecord('WO','add'); it opens the WOTask dialog instead.
+    document.getElementById('btnAddWOModal').onclick = (e)=>{
+      e.preventDefault();
+      if(!state.link.woId) return showErr('Select a Work Order first');
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Add work task', false);
+
+      // Prefer core-provided helper
+      if(core && typeof core.openWOTaskDialog === 'function'){
+        try{ core.openWOTaskDialog(); return; }catch(err){ console.warn('core.openWOTaskDialog failed', err); }
+      }
+
+      // Fallback: open dlgWOTask directly and set defaults
+      const dlgWOTask = document.getElementById('dlgWOTask');
+      const due = document.getElementById('dlgWOTask_due');
+      const note = document.getElementById('dlgWOTask_note');
+
+      if(due){
+        const d = new Date(); d.setMonth(d.getMonth()+1); due.value = d.toISOString().slice(0,10);
+      }
+      if(note) note.value = '';
+
+      if(dlgWOTask){
+        try{ if(typeof dlgWOTask.showModal === 'function') dlgWOTask.showModal(); else dlgWOTask.open = true; }catch(_){ dlgWOTask.open = true; }
+      } else {
+        showErr('Task dialog not available');
+      }
+    };
+
+    document.getElementById('btnEditWORec').onclick = (e)=>{
+      e.preventDefault();
+      if(!state.link.woId)   return showErr('Select a Work Order first');
+      if(!state.selWORecID)  return showErr('Select a Work Order record');
+      const rec=(initial.workOrderRecords||[]).find(r=>S2(r.WorkRecordID)===state.selWORecID);
+      if(!rec) return showErr('Record not found');
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Edit work record', false);
+      core.openRecordDialog('WO','edit',rec);
+    };
+
+    // ===== Delete WO child record — local atomic =====
+    document.getElementById('btnDeleteWORec').onclick = async (e)=>{
+      e.preventDefault();
+      if(!state.selWORecID) return showErr('Select a Work Order record');
+      if(!state.link.woId)  return showErr('Select a Work Order first');
+      const ok = await askConfirm('Delete this Work Order record and mark it as DELETED? Are you sure?', 'Delete Work Order Record');
+      if(!ok) return;
+      try{
+        const wrid = S2(state.selWORecID);
+        await gas('deleteWorkOrderRecord', wrid);
+
+        if (Array.isArray(initial.workOrderRecords)) {
+          initial.workOrderRecords = initial.workOrderRecords.filter(r => S2(r.WorkRecordID) !== wrid);
+        }
+        state.selWORecID = '';
+
+        render();
+        applyVisibility();
+
+        showToast('Work record deleted', false);
+        blinkButton(e.currentTarget);
+      }catch(ex){
+        showErr(ex);
+        showToast(ex && ex.message ? ex.message : 'Delete Work Order record failed', true);
+      }
+    };
+
+    document.getElementById('btnOpenAssign').onclick = (e)=>{
+      e.preventDefault();
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Assign engineer to Work Order', false);
+      openAssignModal('assign');
+    };
+
+    document.getElementById('btnOpenSchedule').onclick = (e)=>{
+      e.preventDefault();
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Set Work Order schedule', false);
+      openAssignModal('schedule');
+    };
+
+    // ===== CLOSE WORK ORDER — local atomic update =====
+    document.getElementById('btnCloseW').onclick = (e)=>{
+      e.preventDefault();
+      (async ()=>{
+        try{
+          if(!state.link.woId) { showErr('Select a Work Order first'); return; }
+          const ok = await askConfirm('Close this Work Order?', 'Close Work Order');
+          if(!ok) return;
+
+          const woId = S2(state.link.woId);
+
+          await gas('closeWorkOrder', woId);
+
+          const now = new Date();
+
+          if (Array.isArray(initial.workorders)) {
+            const w = initial.workorders.find(x => S2(x.WorkOrderID) === woId);
+            if (w) {
+              w.Status     = 'CLOSED';
+              w.LastUpdate = now;
+
+              const tid = S2(w.TicketID || '');
+              if (tid && Array.isArray(initial.tickets)) {
+                const t = initial.tickets.find(x => S2(x.TicketID) === tid);
+                if (t) {
+                  t.Status     = 'CLOSED';
+                  t.LastUpdate = now;
+                }
+              }
+            }
+          }
+
+          state.selWORecID = '';
+          const woRec = document.getElementById('woRec');
+          if (woRec) {
+            woRec.innerHTML = '<span class="meta">Work order records will appear here…</span>';
+          }
+
+          render();
+          applyVisibility();
+
+          showToast('Work order closed', false);
+          blinkButton(e.currentTarget);
+        }catch(ex){
+          showErr(ex);
+          showToast(ex && ex.message ? ex.message : 'Close Work Order failed', true);
+        }
+      })();
+    };
+
+    // ===== Delete Work Order — local atomic update =====
+    document.getElementById('btnDeleteWO').onclick = (e)=>{
+      e.preventDefault();
+      (async ()=>{
+        try{
+          if(!state.link.woId) { showErr('Select a Work Order first'); return; }
+          const ok = await askConfirm('Deleting this will delete this Work Order and all linked records. Are you sure?', 'Delete Work Order');
+          if(!ok) return;
+
+          const woId = S2(state.link.woId);
+
+          await gas('softDeleteWorkOrder', woId);
+
+          if (Array.isArray(initial.workorders)) {
+            initial.workorders = initial.workorders.filter(w => S2(w.WorkOrderID) !== woId);
+          }
+          if (Array.isArray(initial.workOrderRecords)) {
+            initial.workOrderRecords = initial.workOrderRecords.filter(r => S2(r.WorkOrderID) !== woId);
+          }
+
+          state.link.woId   = '';
+          state.selWORecID  = '';
+          state.editW       = false;
+
+          const woRec = document.getElementById('woRec');
+          if (woRec) {
+            woRec.innerHTML = '<span class="meta">Work order records will appear here…</span>';
+          }
+
+          render();
+          applyVisibility();
+
+          showToast('Work order deleted', false);
+          blinkButton(e.currentTarget);
+        }catch(ex){
+          showErr(ex);
+          showToast(ex && ex.message ? ex.message : 'Delete Work Order failed', true);
+        }
+      })();
+    };
+
+    document.getElementById('btnClearWO').onclick = (e)=>{
+      e.preventDefault();
+      pulseOk(e.currentTarget);
+      blinkButton(e.currentTarget);
+      showToast('Work order selection cleared', false);
+      state.link.woId='';
+      state.selWORecID='';
+      state.editW=false;
+      document.getElementById('woRec').innerHTML='<span class="meta">Work order records will appear here…</span>';
+      render();
+      applyVisibility();
+    };
+
+    // =========================================================
+    // Inline Save buttons (tEditSave / wEditSave) wired to local helpers
+    // =========================================================
+    document.addEventListener('click', function(ev){
+      const t = ev.target;
+      if (!t) return;
+
+      if (t.id === 'tEditSave') {
+        ev.preventDefault();
+        (async ()=>{
+          try{
+            await saveTicketTextLocal(t);
+          }catch(ex){ showErr(ex); }
+        })();
+        return;
+      }
+
+      if (t.id === 'wEditSave') {
+        ev.preventDefault();
+        (async ()=>{
+          try{
+            await saveWorkOrderTextLocal(t);
+          }catch(ex){ showErr(ex); }
+        })();
+        return;
+      }
+    });
+
+    // =========================================================
+    // SRP create (Enter Support Ticket Request) — local atomic update
+    // =========================================================
+    const btnCreate      = document.getElementById('btnCreate');
+    const btnClearCreate = document.getElementById('btnClearCreate');
+    const cClient2       = document.getElementById('cClient');
+    const cMarket2       = document.getElementById('cMarket');
+    const cCall2         = document.getElementById('cCall');
+    const cPriority2     = document.getElementById('cPriority');
+    const cReqBy2        = document.getElementById('cRequestedBy');
+    const cReq2          = document.getElementById('cRequest');
+    const createMsg      = document.getElementById('createMsg');
+
+    function buildRequesterPayloadFromSelect(sel){
+      const opt = sel?.selectedOptions?.[0];
+      if(!opt) return {
+        RequestedByType:'', RequestedByID:'', RequestedByName:'', RequestedByEmail:'',
+        RequestedBy:'', ContactID:'', ContactEmail:''
+      };
+
+      const isEngineer = !!opt.dataset.engid;
+      const isContact  = !!opt.dataset.contactid;
+      const displayName = S2(opt.textContent||opt.value||'');
+
+      if(isEngineer){
+        return {
+          RequestedByType:  'ENGINEER',
+          RequestedByID:    S2(opt.dataset.engid||''),
+          RequestedByName:  displayName,
+          RequestedByEmail: S2(opt.dataset.email||''),
+          RequestedBy:      displayName,
+          ContactID:        '',
+          ContactEmail:     S2(opt.dataset.email||'')
+        };
+      }
+      if(isContact){
+        return {
+          RequestedByType:  'CONTACT',
+          RequestedByID:    S2(opt.dataset.contactid||''),
+          RequestedByName:  displayName,
+          RequestedByEmail: S2(opt.dataset.email||''),
+          RequestedBy:      displayName,
+          ContactID:        S2(opt.dataset.contactid||''),
+          ContactEmail:     S2(opt.dataset.email||'')
+        };
+      }
+      return {
+        RequestedByType:'', RequestedByID:'', RequestedByName: displayName, RequestedByEmail:'',
+        RequestedBy: displayName, ContactID:'', ContactEmail:''
+      };
+    }
+
+    if(btnCreate){
+      btnCreate.onclick = async (e)=>{
+        e.preventDefault();
+        try{
+          const ClientID  = S2(cClient2?.value);
+          const MarketID  = S2(cMarket2?.value);
+          const CallSign  = S2(cCall2?.value).toUpperCase();
+          const Priority  = S2(cPriority2?.value||'Low');
+          const req       = buildRequesterPayloadFromSelect(cReqBy2);
+          const SupportRequest = S2(cReq2?.value).trim();
+
+          if(!ClientID || !MarketID || !CallSign || !SupportRequest){
+            throw new Error('Client, Market, Call Sign, and Support Request are required.');
+          }
+
+          const now   = new Date();
+          const TicketID = 'T' + now.getTime();
+
+          const payload = {
+            TicketID,
+            ClientID,
+            MarketID,
+            CallSign,
+            Priority,
+            RequestedByType:  req.RequestedByType,
+            RequestedByID:    req.RequestedByID,
+            RequestedByName:  req.RequestedByName,
+            RequestedByEmail: req.RequestedByEmail,
+            RequestedBy:      req.RequestedBy,
+            ContactID:        req.ContactID,
+            ContactEmail:     req.ContactEmail,
+            SupportRequest
+          };
+
+          await gas('createSupportTicket_OBSI', payload);
+
+          try {
+            const clients = initial.clients || [];
+            const markets = initial.markets || [];
+            const cRec = clients.find(c => S2(c.ClientID) === ClientID) || {};
+            const mRec = markets.find(m => S2(m.MarketID) === MarketID) || {};
+            const nowDate = now;
+
+            const newTicket = {
+              Timestamp      : nowDate,
+              TicketID       : TicketID,
+              ClientID       : ClientID,
+              ClientName     : S2(cRec.ClientName || ClientID),
+              MarketID       : MarketID,
+              MarketName     : S2(mRec.MarketName || MarketID),
+              CallSign       : CallSign,
+              RequestedBy    : req.RequestedBy,
+              ContactEmail   : req.ContactEmail,
+              RequestedByType: req.RequestedByType,
+              RequestedByID  : req.RequestedByID,
+              RequestedByName: req.RequestedByName,
+              RequestedByEmail: req.RequestedByEmail,
+              SupportRequest : SupportRequest,
+              Status         : 'NEW',
+              EmailSent      : '',
+              LastUpdate     : nowDate,
+              ContactID      : req.ContactID,
+              CreatedBy      : '',
+              Time           : nowDate,
+              EngineerID     : '',
+              EngineerName   : '',
+              Priority       : Priority
+            };
+
+            if (!Array.isArray(initial.tickets)) {
+              initial.tickets = [];
+            }
+            initial.tickets.push(newTicket);
+
+            const fClient = document.getElementById('fClient');
+            const fMarket = document.getElementById('fMarket');
+            const fCall   = document.getElementById('fCall');
+
+            state.filters.clientId = ClientID;
+            state.filters.marketId = MarketID;
+            state.filters.callSign = CallSign;
+
+            if (fClient) fClient.value = ClientID;
+            if (fMarket) {
+              fMarket.innerHTML = '';
+              fMarket.append(new Option('(All Markets)',''));
+              (initial.markets||[])
+                .filter(m => S2(m.ClientID) === ClientID)
+                .sort((a,b)=>S2(a.MarketName||a.MarketID).localeCompare(S2(b.MarketName||b.MarketID)))
+                .forEach(m => fMarket.append(new Option(S2(m.MarketName||m.MarketID), S2(m.MarketID))));
+              fMarket.value = MarketID;
+            }
+            if (fCall) {
+              fCall.innerHTML = '';
+              fCall.append(new Option('(All Stations)',''));
+              (initial.tickets||[])
+                .filter(t => S2(t.ClientID) === ClientID && S2(t.MarketID) === MarketID)
+                .forEach(t => {
+                  const cs = S2(t.CallSign||'').toUpperCase();
+                  if (cs) fCall.append(new Option(cs, cs));
+                });
+              fCall.value = CallSign;
+            }
+
+            render();
+            applyVisibility();
+            showToast('Ticket created: ' + TicketID, false);
+          } catch (localErr) {
+            console.error('[ASP create] local insert failed; UI may require manual refresh', localErr);
+            showToast('Ticket created, but refresh may require reload.', true);
+          }
+
+          blinkButton(e.currentTarget || e.target);
+
+          if(createMsg)   createMsg.textContent = '';
+          if(cCall2)      cCall2.value      = '';
+          if(cMarket2)    cMarket2.value    = '';
+          if(cClient2)    cClient2.value    = '';
+          if(cPriority2)  cPriority2.value  = 'Low';
+          if(cReqBy2)     cReqBy2.value     = '';
+          if(cReq2)       cReq2.value       = '';
+
+        }catch(ex){
+          if(createMsg) createMsg.textContent = S2(ex.message||ex);
+          showErr(ex);
+          showToast(ex && ex.message ? ex.message : 'Ticket creation failed', true);
+        }
+      };
+    }
+
+    if(btnClearCreate){
+      btnClearCreate.onclick = (e)=>{
+        e.preventDefault();
+        pulseOk(e.currentTarget);
+        blinkButton(e.currentTarget);
+        if(cCall2)     cCall2.value='';
+        if(cMarket2)   cMarket2.value='';
+        if(cClient2)   cClient2.value='';
+        if(cPriority2) cPriority2.value='Low';
+        if(cReqBy2)    cReqBy2.value='';
+        if(cReq2)      cReq2.value='';
+        if(createMsg)  createMsg.textContent='';
+        showToast('Entry form cleared', false);
+      };
+    }
+
+    console.log('app_actions: init complete (attached after core ready)');
+  } // end initAppActions
+
+  // Start waiting and then initialize
+  waitForCoreAndInit();
+
+})();
+</script>

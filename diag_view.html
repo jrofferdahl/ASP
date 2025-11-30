@@ -1,0 +1,389 @@
+<!-- diag_view — Diagnostics panel + routing for OBSI Support Console -->
+<section id="diagView" class="wrap" style="display:none; padding:12px 16px;">
+  <div class="panel" style="padding:12px;">
+    <div class="p-banner">
+      <h3 class="p-title">Diagnostics</h3>
+      <div class="p-meta" id="diagMeta"></div>
+      <div>
+        <button id="btnDiagRefresh" class="btn-ghost" type="button" title="Re-run all diagnostics">Refresh</button>
+        <button id="btnDiagBack" class="btn-ghost" type="button" title="Back to Console">Back</button>
+      </div>
+    </div>
+    <div id="diagRoot"><div class="meta">Loading diagnostics...</div></div>
+  </div>
+</section>
+
+<script>
+  (function(){
+    // In-memory payload sink for Copy
+    window.__diagPayloads = {};
+
+    var $ = function(id){ return document.getElementById(id); };
+
+    function esc(s){
+      return String(s || "").replace(/[&<>"]/g, function(m){
+        return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;" })[m];
+      });
+    }
+
+    function qs(name){
+      var m = new RegExp("[?&]" + name + "=([^&]+)").exec(location.search);
+      return m ? decodeURIComponent(m[1].replace(/\+/g, " ")) : "";
+    }
+
+    function setRoute(view){
+      var url = new URL(location.href);
+      if(view) url.searchParams.set("view", view);
+      else url.searchParams.delete("view");
+      history.replaceState(null, "", url.toString()); // no reload
+    }
+
+    function show(view){
+      var diag = $("diagView");
+      var main = $("mainWrap");
+      var filt = $("filtersWrap");
+      var srp  = $("srpEntry");
+      if(view === "diag"){
+        if(diag) diag.style.display = "block";
+        if(main) main.style.display = "none";
+        if(filt) filt.style.display = "none";
+        if(srp)  srp.style.display  = "none";
+        runDiagnostics();
+      } else {
+        if(diag) diag.style.display = "none";
+        if(main) main.style.display = "";
+        if(filt) filt.style.display = "";
+        if(srp)  srp.style.display  = "";
+      }
+      setRoute(view === "diag" ? "diag" : "");
+    }
+
+    function badge(ok){
+      return (
+        '<span class="meta" ' +
+        'style="padding:2px 6px;border-radius:12px;border:1px solid ' +
+        (ok ? "#3c9" : "#e66") +
+        ';margin-left:6px;">' +
+        (ok ? "OK" : "FAIL") +
+        "</span>"
+      );
+    }
+
+    function row(k, v){
+      return (
+        "<tr>" +
+          '<td style="padding:2px 10px 2px 0;color:#444;"><strong>' +
+            esc(k) +
+          "</strong></td>" +
+          "<td>" + v + "</td>" +
+        "</tr>"
+      );
+    }
+
+    function codePretty(obj){
+      try{
+        return JSON.stringify(obj, null, 2);
+      }catch(_){
+        return String(obj || "");
+      }
+    }
+
+    // Clipboard helper
+    function copyText(text){
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(text);
+        } else {
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity  = "0";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }
+        toast("Copied to clipboard");
+      }catch(_){
+        toast("Copy failed", true);
+      }
+    }
+
+    function toast(msg, err){
+      var bar = $(err ? "errbar" : "notice");
+      if(!bar) return;
+      bar.textContent = msg;
+      bar.className = (err ? "errbar" : "noticebar") + " show";
+      setTimeout(function(){
+        bar.className = err ? "errbar" : "noticebar";
+      }, 1800);
+    }
+
+    // Render one block with a Copy button (payload stored in __diagPayloads)
+    function blockHTML(id, title, ok, innerHTML, copyPayloadObj){
+      window.__diagPayloads[id] = codePretty(copyPayloadObj);
+      var btn =
+        '<button class="btn-ghost" data-copy="' + esc(id) +
+        '" type="button" style="margin-left:8px">Copy</button>';
+      return (
+        '<div class="p-banner">' +
+          '<h4 style="margin:8px 0;">' +
+            esc(title) + " " + badge(!!ok) + btn +
+          "</h4>" +
+        "</div>" +
+        '<div id="' + esc(id) + '-content">' + innerHTML + "</div>"
+      );
+    }
+
+    function renderPanel(meta, blocks){
+      window.__diagPayloads["diag-env"] = codePretty({
+        build:  meta.build,
+        tz:     meta.tz,
+        now:    meta.now,
+        fileId: meta.fileId,
+        url:    meta.url,
+        email:  meta.email
+      });
+
+      var root = $("diagRoot");
+      if(!root) return;
+
+      var hdrTable =
+        '<table style="border-collapse:collapse;margin:6px 0;">' +
+          row("Build",    esc(meta.build  || "")) +
+          row("Time Zone",esc(meta.tz     || "")) +
+          row("Now",      esc(meta.now    || "")) +
+          row("FILE_ID",  esc(meta.fileId || "")) +
+          row("URL",      esc(meta.url    || "")) +
+          row(
+            "Email",
+            meta.email
+              ? (meta.email.enabled ? "ENABLED " : "DISABLED ") +
+                " · " +
+                (meta.email.remaining || 0) +
+                "/" +
+                (meta.email.total || "—")
+              : "—"
+          ) +
+        "</table>";
+
+      var envBlock =
+        '<div class="p-banner">' +
+          '<h4 style="margin:8px 0;">' +
+            "Environment " + badge(true) +
+            '<button class="btn-ghost" data-copy="diag-env" type="button" style="margin-left:8px">Copy</button>' +
+          "</h4>" +
+        "</div>" +
+        hdrTable;
+
+      root.innerHTML = envBlock + blocks.join("");
+    }
+
+    function runDiagnostics(){
+      $("diagMeta").textContent = "Running...";
+      $("diagRoot").innerHTML  = '<div class="meta">Running diagnostics...</div>';
+
+      var meta   = {};
+      var blocks = [];
+      var pending = 5; // ssr, headers, integrity, email, rpc
+
+      function done(){
+        pending--;
+        if(pending <= 0){
+          renderPanel(meta, blocks);
+          $("diagMeta").textContent = "Done";
+        }
+      }
+
+      // Ping (meta)
+      google.script.run
+        .withSuccessHandler(function(p){ meta = p || {}; })
+        .withFailureHandler(function(){ meta = {}; })
+        .diag_ping();
+
+      // SSR
+      google.script.run
+        .withSuccessHandler(function(ssr){
+          var ok = !!(ssr && ssr.ok);
+          var html =
+            '<table style="border-collapse:collapse;margin:6px 0;">' +
+              row("Keys", String(ssr && ssr.keys ? ssr.keys.length : 0)) +
+              row(
+                "Counts",
+                '<pre style="white-space:pre-wrap;margin:6px 0;background:#fafafa;border:1px solid #eee;padding:8px;max-height:320px;overflow:auto;">' +
+                  esc(codePretty((ssr && ssr.counts) || {})) +
+                "</pre>"
+              ) +
+            "</table>";
+          var payload = {
+            ok:     !!ok,
+            keys:   (ssr && ssr.keys)   || [],
+            counts: (ssr && ssr.counts) || {}
+          };
+          blocks.push(blockHTML("diag-ssr", "SSR Probe", ok, html, payload));
+          done();
+        })
+        .withFailureHandler(function(e){
+          var payload = { ok:false, error:String(e && (e.message || e)) };
+          blocks.push(
+            blockHTML(
+              "diag-ssr",
+              "SSR Probe",
+              false,
+              '<div class="meta">SSR probe failed.</div>',
+              payload
+            )
+          );
+          done();
+        })
+        .diag_ssrProbe();
+
+      // Headers
+      google.script.run
+        .withSuccessHandler(function(h){
+          var okh = !!(h && h.ok);
+          var rows = (h && h.results ? h.results : []).map(function(r){
+            var status = r.ok ? "OK" : ("Missing: " + (r.missing || []).join(", "));
+            return row(r.sheet, esc(status));
+          }).join("");
+          var html =
+            '<table style="border-collapse:collapse;margin:6px 0;">' +
+              rows +
+            "</table>";
+          blocks.push(blockHTML("diag-headers", "Header Validator", okh, html, h || {}));
+          done();
+        })
+        .withFailureHandler(function(e){
+          var payload = { ok:false, error:String(e && (e.message || e)) };
+          blocks.push(
+            blockHTML(
+              "diag-headers",
+              "Header Validator",
+              false,
+              '<div class="meta">Header validator failed.</div>',
+              payload
+            )
+          );
+          done();
+        })
+        .diag_headers();
+
+      // Integrity
+      google.script.run
+        .withSuccessHandler(function(integ){
+          var oki = !!(integ && integ.ok);
+          var html =
+            '<pre style="white-space:pre-wrap;margin:6px 0;background:#fafafa;border:1px solid #eee;padding:8px;max-height:420px;overflow:auto;">' +
+              esc(codePretty(integ || {})) +
+            "</pre>";
+          blocks.push(blockHTML("diag-integrity", "Data Integrity", oki, html, integ || {}));
+          done();
+        })
+        .withFailureHandler(function(e){
+          var payload = { ok:false, error:String(e && (e.message || e)) };
+          blocks.push(
+            blockHTML(
+              "diag-integrity",
+              "Data Integrity",
+              false,
+              '<div class="meta">Integrity check failed.</div>',
+              payload
+            )
+          );
+          done();
+        })
+        .diag_integrity();
+
+      // Email
+      google.script.run
+        .withSuccessHandler(function(em){
+          meta.email = em || {};
+          var html =
+            '<table style="border-collapse:collapse;margin:6px 0;">' +
+              row("Enabled", (em && em.enabled) ? "Yes" : "No") +
+              row(
+                "Remaining/Total",
+                esc(
+                  (em && em.remaining != null ? em.remaining : "—") +
+                  "/" +
+                  (em && em.total     != null ? em.total     : "—")
+                )
+              ) +
+            "</table>";
+          blocks.push(blockHTML("diag-email", "Email Status", true, html, em || {}));
+          done();
+        })
+        .withFailureHandler(function(e){
+          var payload = { ok:false, error:String(e && (e.message || e)) };
+          blocks.push(
+            blockHTML(
+              "diag-email",
+              "Email Status",
+              false,
+              '<div class="meta">Email status failed.</div>',
+              payload
+            )
+          );
+          done();
+        })
+        .diag_emailStatus();
+
+      // RPC Smoke
+      google.script.run
+        .withSuccessHandler(function(sm){
+          var oks = !!(sm && sm.ok);
+          var html =
+            '<pre style="white-space:pre-wrap;margin:6px 0;background:#fafafa;border:1px solid #eee;padding:8px;max-height:420px;overflow:auto;">' +
+              esc(codePretty(sm || {})) +
+            "</pre>";
+          blocks.push(blockHTML("diag-rpc", "RPC Smoke", oks, html, sm || {}));
+          done();
+        })
+        .withFailureHandler(function(e){
+          var payload = { ok:false, error:String(e && (e.message || e)) };
+          blocks.push(
+            blockHTML(
+              "diag-rpc",
+              "RPC Smoke",
+              false,
+              '<div class="meta">RPC smoke failed.</div>',
+              payload
+            )
+          );
+          done();
+        })
+        .diag_rpcSmoke();
+    }
+
+    // Copy buttons (delegated)
+    document.addEventListener("click", function(ev){
+      var t = ev.target;
+      if(t && t.getAttribute && t.getAttribute("data-copy")){
+        var id  = t.getAttribute("data-copy");
+        var txt = (window.__diagPayloads && window.__diagPayloads[id]) || "";
+        if(txt) copyText(txt);
+        else    toast("Nothing to copy", true);
+      }
+    });
+
+    // Wire buttons + initial route
+    var b  = $("btnDiag");
+    var br = $("btnDiagRefresh");
+    var bb = $("btnDiagBack");
+
+    if(b){
+      b.addEventListener("click", function(){
+        var isDiag = (qs("view") === "diag");
+        show(isDiag ? "" : "diag");
+      });
+    }
+    if(br) br.addEventListener("click", runDiagnostics);
+    if(bb){
+      bb.addEventListener("click", function(){ show(""); });
+    }
+
+    // Initial route
+    show(qs("view"));
+  })();
+</script>

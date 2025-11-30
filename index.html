@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OBSI Support Console</title>
+
+  <!-- Styles -->
+  <?!= include('styles'); ?>
+
+  <!-- SSR payload -->
+  <? var __json = JSON.stringify(initial).replace(/<\/script/gi,'<\\/script'); ?>
+  <script id="__INITIAL__" type="application/json"><?!= __json ?></script>
+
+  <!-- Minimal UI tweaks for centered title + app-bar toast + filter layout + panel filters -->
+  <style>
+    .appbar {
+      position: relative; /* needed for centered title but does not affect layout otherwise */
+    }
+    .appbar-title-center {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      margin: 0;
+      font-size: 1.2rem;
+      font-weight: 600;
+      text-align: center;
+      white-space: nowrap;
+    }
+    /* Toast: inline between copy and title, blue text on white pill */
+    .app-toast {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 8px;
+      background: #ffffff;
+      color: #1e3a8a;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      border: 1px solid rgba(255,255,255,0.7);
+      box-shadow: none;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease-in-out;
+      white-space: nowrap;
+    }
+    .app-toast.show {
+      opacity: 1;
+    }
+
+    /* FILTER BAR LAYOUT */
+    #filtersWrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    #filtersWrap .field {
+      flex: 1 1 140px;
+      min-width: 120px;
+    }
+    #filtersWrap .field .select,
+    #filtersWrap .field input {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    #filtersWrap .field:last-child {
+      flex: 0 0 auto;
+      min-width: auto;
+    }
+    #filtersWrap .field:last-child button {
+      white-space: nowrap;
+    }
+
+    /* Panel banners with right-side controls */
+    .p-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .p-banner-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .p-filter label.meta {
+      margin-right: 4px;
+    }
+    .p-filter select {
+      font-size: 0.8rem;
+      padding: 2px 6px;
+      min-width: 110px;
+    }
+
+    /* OBSI custom confirm modal (replaces browser confirm/alert Chrome "embedded page" UI) */
+    .obsi-confirm-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15,23,42,0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .obsi-confirm-dialog {
+      background: #ffffff;
+      border-radius: 0.75rem;
+      padding: 1.25rem 1.5rem;
+      max-width: 420px;
+      width: 90%;
+      box-shadow: 0 10px 40px rgba(15,23,42,0.35);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border: 1px solid #e5e7eb;
+    }
+    .obsi-confirm-title {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 0 0 0.5rem 0;
+      color: #0f172a;
+    }
+    .obsi-confirm-message {
+      font-size: 0.9rem;
+      color: #4b5563;
+      margin-bottom: 1rem;
+    }
+    .obsi-confirm-buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+    .obsi-confirm-buttons button {
+      border-radius: 999px;
+      border: 1px solid transparent;
+      padding: 0.35rem 0.9rem;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    #obsi-confirm-ok {
+      background: #2563eb;
+      color: #ffffff;
+      border-color: #1d4ed8;
+    }
+    #obsi-confirm-ok:hover {
+      background: #1d4ed8;
+    }
+    #obsi-confirm-cancel {
+      background: #ffffff;
+      color: #374151;
+      border-color: #d1d5db;
+    }
+    #obsi-confirm-cancel:hover {
+      background: #f3f4f6;
+    }
+  </style>
+</head>
+<body>
+  <!-- Notice + Error bars -->
+  <div id="notice" class="noticebar"></div>
+  <div id="errbar" class="errbar"></div>
+
+  <!-- Boot probe -->
+  <?!= include('boot_probe'); ?>
+
+  <!-- App bar -->
+  <div class="appbar" style="display:flex; align-items:center; gap:12px;">
+    <div class="copy">© <span id="cpyYear"></span> Offerdahl Broadcast Service, Inc.</div>
+
+    <!-- Toast pill between copyright and title -->
+    <div id="appToast" class="app-toast"></div>
+
+    <!-- Centered title -->
+    <h1 class="appbar-title-center">Support and Work Order Administration</h1>
+
+    <div style="flex:1"></div>
+
+    <div id="appActions" style="display:flex; gap:8px; align-items:center;">
+      <button id="btnDiag" class="about" type="button" title="Open Diagnostics view">Diagnostics</button>
+      <!-- Debug Refresh button -->
+      <button id="btnDebugRefresh" class="about" type="button" title="Debug: run fullRefreshAndRepaint()">
+        Debug Refresh
+      </button>
+      <button id="btnEmailToggle" class="about" type="button" title="Enable/Disable all informative emails">Email: …</button>
+      <button id="btnAbout" class="about" type="button">About</button>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="filters" id="filtersWrap">
+    <div class="field"><label>Client</label><select id="fClient" class="select"></select></div>
+    <div class="field"><label>Market</label><select id="fMarket" class="select"></select></div>
+    <div class="field"><label>Call Sign</label><select id="fCall" class="select"></select></div>
+    <div class="field"><label>Engineer</label><select id="fEng" class="select"></select></div>
+    <div class="field"><label>Status</label>
+      <select id="fStatus" class="select">
+        <option value="active">Active Only</option>
+        <option value="SCHEDULED">SCHEDULED</option>
+        <option value="CLOSED">CLOSED</option>
+        <option value="DELETED">DELETED</option>
+        <option value="">All</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Search</label>
+      <input id="fSearch" class="select" placeholder="Requested by / Request / WO text…">
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="btnClearFilters" class="btn-ghost" type="button">Clear Filters</button>
+    </div>
+  </div>
+
+  <!-- Main content -->
+  <div class="wrap" id="mainWrap">
+    <div class="grid2">
+      <!-- Tickets -->
+      <section class="panel">
+        <div class="p-banner">
+          <h3 class="p-title">Support Tickets</h3>
+          <div class="p-banner-right">
+            <div class="p-meta" id="tCount"></div>
+            <div class="p-filter">
+              <label class="meta" for="stSort">Sort:</label>
+              <select id="stSort" class="select small">
+                <option value="lastdesc" selected>Newest → Oldest</option>
+                <option value="lastasc">Oldest → Newest</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <?!= include('toolbars_st'); ?>
+        <div id="ticketsList" class="list"></div>
+        <div id="ticketsRec" class="records">
+          <span class="meta">Ticket records will appear here…</span>
+        </div>
+      </section>
+
+      <!-- Work Orders -->
+      <section class="panel">
+        <div class="p-banner">
+          <h3 class="p-title">Work Orders</h3>
+          <div class="p-banner-right">
+            <div class="p-meta" id="wCount"></div>
+            <div class="p-filter">
+              <label class="meta" for="woSort">Sort:</label>
+              <select id="woSort" class="select small">
+                <option value="lastdesc" selected>Newest → Oldest</option>
+                <option value="lastasc">Oldest → Newest</option>
+              </select>
+            </div>
+
+            <button type="button"
+                    id="btnEmailItinerary"
+                    class="btn-ghost"
+                    title="Email itinerary for this work order">
+              Email Itinerary
+            </button>
+          </div>
+        </div>
+        <?!= include('toolbars_wo'); ?>
+        <div id="woList" class="list"></div>
+        <div id="woRec" class="records">
+          <span class="meta">Work order records will appear here…</span>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- SRP Entry -->
+  <section class="entry-card" id="srpEntry">
+    <div class="entry-head"><h2>Enter Support Ticket Request</h2></div>
+    <div class="entry-body">
+      <div class="row">
+        <div class="field"><label class="upper">Client</label><select id="cClient"></select></div>
+        <div class="field"><label class="upper">Market</label><select id="cMarket" disabled></select></div>
+        <div class="field"><label class="upper">Call Sign</label><select id="cCall" disabled></select></div>
+        <div class="field"><label class="upper">Priority</label><select id="cPriority"></select></div>
+        <div class="field">
+          <label class="upper" for="cRequestedBy">Requested By <span class="meta" style="font-weight:400;">(Contacts & Engineers)</span></label>
+          <select id="cRequestedBy" aria-describedby="rbHelp"></select>
+          <div id="rbHelp" class="muted">Pick a <strong>Contact</strong> (filtered by Client/Market, includes CORP) or an <strong>Active Engineer</strong>.</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field" style="min-width:100%"><label class="upper">Support Request</label>
+          <textarea id="cRequest" placeholder="Describe the issue or request..."></textarea>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button id="btnCreate" class="btn" type="button">Submit Request</button>
+        <button id="btnClearCreate" class="btn-ghost" type="button">Clear</button>
+        <div id="createMsg" class="meta"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Diagnostics view -->
+  <section id="diagView" class="wrap" style="display:none; padding:12px 16px;">
+    <div class="panel" style="padding:12px;">
+      <div class="p-banner">
+        <h3 class="p-title">Diagnostics</h3>
+        <div class="p-meta" id="diagMeta"></div>
+        <div>
+          <button id="btnDiagRefresh" class="btn-ghost" type="button" title="Re-run all diagnostics">Refresh</button>
+          <button id="btnDiagBack" class="btn-ghost" type="button" title="Back to Console">Back</button>
+        </div>
+      </div>
+      <div id="diagRoot"><div class="meta">Loading diagnostics…</div></div>
+    </div>
+  </section>
+
+  <!-- OBSI custom confirm modal -->
+  <div id="obsi-confirm-overlay" class="obsi-confirm-overlay">
+    <div class="obsi-confirm-dialog">
+      <h4 id="obsi-confirm-title" class="obsi-confirm-title">Please Confirm</h4>
+      <div id="obsi-confirm-message" class="obsi-confirm-message">
+        Are you sure you want to continue?
+      </div>
+      <div class="obsi-confirm-buttons">
+        <button type="button" id="obsi-confirm-ok">Yes</button>
+        <button type="button" id="obsi-confirm-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dialogs + Core -->
+  <?!= include('dialogs'); ?>
+  <?!= include('app_core'); ?>
+
+  <!-- Canonical fullRefreshAndRepaint (simple, no snapshot; used by atomic()) -->
+  <script>
+    async function fullRefreshAndRepaint(){
+      const core = window._obsiCore;
+      if (!core || typeof core.gas !== 'function') {
+        console.warn('[fullRefreshAndRepaint] _obsiCore or gas missing');
+        if (window.showAppToast) {
+          window.showAppToast('Debug: _obsiCore or gas missing', true);
+        }
+        return;
+      }
+
+      console.log('[fullRefreshAndRepaint] starting refreshInitial()');
+      if (window.showAppToast) {
+        window.showAppToast('Debug: View refresh starting…', false);
+      }
+
+      try {
+        const payload = await core.gas('refreshInitial');
+        console.log('[fullRefreshAndRepaint] payload received', {
+          tickets: (payload && payload.tickets ? payload.tickets.length : 0),
+          supportRecords: (payload && payload.supportRecords ? payload.supportRecords.length : 0),
+          workorders: (payload && payload.workorders ? payload.workorders.length : 0),
+          workOrderRecords: (payload && payload.workOrderRecords ? payload.workOrderRecords.length : 0)
+        });
+
+        if (payload) {
+          const init = core.initial || {};
+          init.tickets          = payload.tickets          || init.tickets          || [];
+          init.supportRecords   = payload.supportRecords   || init.supportRecords   || [];
+          init.workorders       = payload.workorders       || init.workorders       || [];
+          init.workOrderRecords = payload.workOrderRecords || init.workOrderRecords || [];
+          init.contacts         = payload.contacts         || init.contacts         || [];
+          init.clientContacts   = payload.clientContacts   || init.clientContacts   || [];
+          init.clients          = payload.clients          || init.clients          || [];
+          init.markets          = payload.markets          || init.markets          || [];
+          init.callsigns        = payload.callsigns        || init.callsigns        || [];
+          init.engineers        = payload.engineers        || init.engineers        || [];
+        }
+
+        console.log('[fullRefreshAndRepaint] calling core.render/applyVisibility/hydrateEntry');
+        if (typeof core.render === 'function')          core.render();
+        if (typeof core.applyVisibility === 'function') core.applyVisibility();
+        if (typeof core.hydrateEntry === 'function')    core.hydrateEntry();
+
+        // NEW: explicitly repaint selected Ticket/WO detail panes
+        try {
+          const st = core.state || {};
+          const link = st.link || {};
+          const init = core.initial || {};
+          const selTid = link.ticketId || '';
+          const selWid = link.woId || '';
+
+          console.log('[fullRefreshAndRepaint] detail repaint context', {
+            ticketId: selTid,
+            woId: selWid
+          });
+
+          if (selTid && typeof core.paintTkDetail === 'function') {
+            const tLatest = (init.tickets || []).find(t => String(t.TicketID) === String(selTid));
+            if (tLatest) {
+              console.log('[fullRefreshAndRepaint] repaint Ticket detail for', selTid);
+              core.paintTkDetail(tLatest);
+            }
+          }
+          if (selWid && typeof core.paintWoDetail === 'function') {
+            const wLatest = (init.workorders || []).find(w => String(w.WorkOrderID) === String(selWid));
+            if (wLatest) {
+              console.log('[fullRefreshAndRepaint] repaint WO detail for', selWid);
+              core.paintWoDetail(wLatest);
+            }
+          }
+        } catch (detailErr) {
+          console.warn('[fullRefreshAndRepaint] detail repaint skipped/failed', detailErr);
+        }
+
+        if (window._obsiUX && window._obsiUX.flash) {
+          window._obsiUX.flash('View refreshed');
+        }
+        if (window.showAppToast) {
+          window.showAppToast('Debug: View refreshed OK', false);
+        }
+      } catch (err) {
+        console.error('[fullRefreshAndRepaint] failed', err);
+        if (window._obsiUX && window._obsiUX.showErr) {
+          window._obsiUX.showErr(err);
+        } else {
+          // Fallback: use errbar instead of browser alert (avoids "embedded page" popup)
+          var bar = document.getElementById('errbar');
+          if (bar) {
+            var msg = 'Refresh failed: ' + (err && err.message ? err.message : err);
+            bar.textContent = msg;
+            bar.className = 'errbar show';
+            setTimeout(function(){ bar.className = 'errbar'; }, 3000);
+          }
+        }
+        if (window.showAppToast) {
+          window.showAppToast('Debug: Refresh failed — ' + (err && err.message ? err.message : err), true);
+        }
+        throw err;
+      }
+    }
+
+    // Ensure _obsiCore has a reference to this function
+    if (window._obsiCore) {
+      window._obsiCore.fullRefreshAndRepaint = fullRefreshAndRepaint;
+    }
+  </script>
+
+  <!-- DEBUG: Wire Debug Refresh button to fullRefreshAndRepaint -->
+  <script>
+    (function(){
+      var btn = document.getElementById('btnDebugRefresh');
+      function wire(){
+        if(!btn) return;
+        btn.addEventListener('click', async function(){
+          try{
+            console.log('[DebugRefresh] clicked');
+            if (window.showAppToast) {
+              window.showAppToast('Debug: manual full refresh…', false);
+            }
+            if (window._obsiCore && typeof window._obsiCore.fullRefreshAndRepaint === 'function'){
+              await window._obsiCore.fullRefreshAndRepaint();
+            } else if (typeof window.fullRefreshAndRepaint === 'function'){
+              await window.fullRefreshAndRepaint();
+            } else {
+              console.warn('[DebugRefresh] fullRefreshAndRepaint not available');
+              if (window.showAppToast) {
+                window.showAppToast('Debug: fullRefreshAndRepaint not available', true);
+              }
+            }
+          }catch(e){
+            console.error('[DebugRefresh] failed', e);
+            if (window.showAppToast) {
+              window.showAppToast('Debug refresh failed: ' + (e && e.message ? e.message : e), true);
+            }
+          }
+        });
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', wire);
+      } else {
+        wire();
+      }
+    })();
+  </script>
+
+  <!-- Post-core probe -->
+  <script>
+    (function(){
+      var n = document.getElementById('notice');
+      try {
+        if (window._obsiCore) {
+          n.textContent = 'diag: app_core loaded and _obsiCore is present';
+          n.className = 'noticebar show';
+          setTimeout(function(){ n.className = 'noticebar'; }, 2200);
+        } else {
+          n.textContent = 'diag: app_core included but _obsiCore missing (post-include check)';
+          n.className = 'errbar show';
+          setTimeout(function(){ n.className = 'errbar'; }, 2200);
+        }
+      } catch (e) {
+        var b = document.getElementById('errbar');
+        if (b) {
+          b.textContent = 'diag: exception after app_core include — ' + (e.message||e);
+          b.className='errbar show';
+          setTimeout(function(){ b.className='errbar'; }, 2200);
+        }
+      }
+    })();
+  </script>
+
+  <!-- Actions -->
+  <?!= include('app_actions'); ?>
+
+  <!-- Global app-bar toast helper used by app_actions (blue on white in header) -->
+  <script>
+    (function(){
+      var el = document.getElementById('appToast');
+      window.showAppToast = function(message, isError){
+        if(!el) return;
+        el.textContent = message || '';
+        el.style.backgroundColor = '#ffffff';
+        if(isError){
+          el.style.color = '#b91c1c';
+          el.style.borderColor = 'rgba(248,113,113,0.9)';
+        }else{
+          el.style.color = '#1e3a8a';
+          el.style.borderColor = 'rgba(255,255,255,0.7)';
+        }
+        el.classList.add('show');
+        if(el.__timer){
+          clearTimeout(el.__timer);
+        }
+        el.__timer = setTimeout(function(){
+          el.classList.remove('show');
+        }, 2200);
+      };
+    })();
+  </script>
+
+  <!-- OBSI custom confirm helper (async, used instead of window.confirm) -->
+  <script>
+    (function(){
+      function obsiConfirm(message, title){
+        return new Promise(function(resolve){
+          var overlay = document.getElementById('obsi-confirm-overlay');
+          if (!overlay) {
+            // Fallback to native confirm if for some reason the overlay is missing
+            resolve(window.confirm(message || ''));
+            return;
+          }
+          var msgEl   = document.getElementById('obsi-confirm-message');
+          var titleEl = document.getElementById('obsi-confirm-title');
+          var okBtn   = document.getElementById('obsi-confirm-ok');
+          var cancel  = document.getElementById('obsi-confirm-cancel');
+
+          msgEl.textContent = message || '';
+          if (titleEl) {
+            titleEl.textContent = title || 'Please Confirm';
+          }
+
+          function cleanup(result){
+            overlay.style.display = 'none';
+            okBtn.removeEventListener('click', onOk);
+            cancel.removeEventListener('click', onCancel);
+            document.removeEventListener('keydown', onKey);
+            resolve(result);
+          }
+
+          function onOk(){ cleanup(true); }
+          function onCancel(){ cleanup(false); }
+          function onKey(e){
+            if (e.key === 'Escape') cleanup(false);
+            else if (e.key === 'Enter') cleanup(true);
+          }
+
+          okBtn.addEventListener('click', onOk);
+          cancel.addEventListener('click', onCancel);
+          document.addEventListener('keydown', onKey);
+
+          overlay.style.display = 'flex';
+        });
+      }
+      window.obsiConfirm = obsiConfirm;
+    })();
+  </script>
+
+  <!-- Email Toggle wiring (quota removed) -->
+  <script>
+    (function(){
+      function setNotice(msg, isErr){
+        var bar = document.getElementById(isErr ? 'errbar' : 'notice');
+        if(!bar) return;
+        bar.textContent = msg;
+        bar.className = (isErr ? 'errbar' : 'noticebar') + ' show';
+        setTimeout(function(){ bar.className = isErr ? 'errbar' : 'noticebar'; }, 2200);
+      }
+      function renderEmail(model){
+        var btnT = document.getElementById('btnEmailToggle');
+        if(btnT && model){
+          btnT.textContent = 'Email: ' + (model.enabled ? 'ON' : 'OFF');
+          btnT.dataset.enabled = model.enabled ? '1' : '0';
+        }
+      }
+      try{
+        var ssr = JSON.parse(document.getElementById('__INITIAL__').textContent||'{}')||{};
+        if(ssr.email) renderEmail(ssr.email);
+      }catch(_){}
+
+      var btnToggle = document.getElementById('btnEmailToggle');
+      if(btnToggle){
+        btnToggle.addEventListener('click', function(){
+          var cur = btnToggle.dataset.enabled === '1';
+          btnToggle.disabled = true;
+          google.script.run
+            .withSuccessHandler(function(m){
+              btnToggle.disabled=false;
+              renderEmail(m);
+              setNotice(m.enabled ? 'Email sending ENABLED' : 'Email sending DISABLED', false);
+            })
+            .withFailureHandler(function(err){
+              btnToggle.disabled=false;
+              setNotice(err && err.message ? err.message : 'Failed to toggle email state', true);
+            })
+            .setEmailEnabled(!cur);
+        });
+      }
+    })();
+  </script>
+
+  <!-- Diagnostics routing + renderer (no quota numbers) -->
+  <script>
+    (function(){
+      window.__diagPayloads = {};
+
+      var $ = function(id){ return document.getElementById(id); };
+      function esc(s){ return String(s||'').replace(/[&<>"]/g, function(m){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]); }); }
+      function qs(name){ var m = new RegExp('[?&]'+name+'=([^&]+)').exec(location.search); return m ? decodeURIComponent(m[1].replace(/\+/g,' ')) : ''; }
+      function setRoute(view){
+        var url = new URL(location.href);
+        if(view) url.searchParams.set('view', view); else url.searchParams.delete('view');
+        history.replaceState(null, '', url.toString());
+      }
+      function show(view){
+        var diag = $('diagView'), main = $('mainWrap'), filt = $('filtersWrap'), srp = $('srpEntry');
+        if(view==='diag'){
+          if(diag) diag.style.display='block';
+          if(main) main.style.display='none';
+          if(filt) filt.style.display='none';
+          if(srp)  srp.style.display='none';
+          runDiagnostics();
+        }else{
+          if(diag) diag.style.display='none';
+          if(main) main.style.display='';
+          if(filt) filt.style.display='';
+          if(srp)  srp.style.display='';
+        }
+        setRoute(view==='diag' ? 'diag' : '');
+      }
+      function badge(ok){ return '<span class="meta" style="padding:2px 6px;border-radius:12px;border:1px solid '+(ok?'#3c9':'#e66')+';margin-left:6px;">'+(ok?'OK':'FAIL')+'</span>'; }
+      function row(k,v){ return '<tr><td style="padding:2px 10px 2px 0;color:#444;"><strong>'+esc(k)+'</strong></td><td>'+v+'</td></tr>'; }
+      function codePretty(obj){ try{ return JSON.stringify(obj, null, 2); }catch(_){ return String(obj||''); } }
+
+      function copyText(text){
+        try{
+          if(navigator.clipboard && navigator.clipboard.writeText){
+            navigator.clipboard.writeText(text);
+          }else{
+            var ta = document.createElement('textarea');
+            ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+            document.body.appendChild(ta); ta.focus(); ta.select();
+            document.execCommand('copy'); document.body.removeChild(ta);
+          }
+          toast('Copied to clipboard');
+        }catch(_){ toast('Copy failed', true); }
+      }
+      function toast(msg, err){
+        var bar = $(err ? 'errbar' : 'notice');
+        if(!bar) return;
+        bar.textContent = msg;
+        bar.className = (err?'errbar':'noticebar')+' show';
+        setTimeout(function(){ bar.className = err?'errbar':'noticebar'; }, 1800);
+      }
+
+      function blockHTML(id, title, ok, innerHTML, copyPayloadObj){
+        window.__diagPayloads[id] = codePretty(copyPayloadObj);
+        var btn = '<button class="btn-ghost" data-copy="'+esc(id)+'" type="button" style="margin-left:8px">Copy</button>';
+        return '<div class="p-banner"><h4 style="margin:8px 0;">'+esc(title)+' '+badge(!!ok)+btn+'</h4></div>' + '<div id="'+esc(id)+'-content">'+innerHTML+'</div>';
+      }
+
+      function renderPanel(meta, blocks){
+        window.__diagPayloads['diag-env'] = codePretty({
+          build:meta.build, tz:meta.tz, now:meta.now,
+          fileId:meta.fileId, url:meta.url, email:meta.email
+        });
+        var root = $('diagRoot'); if(!root) return;
+        var hdrTable =
+          '<table style="border-collapse:collapse;margin:6px 0;">' +
+          row('Build', esc(meta.build||'')) +
+          row('Time Zone', esc(meta.tz||'')) +
+          row('Now', esc(meta.now||'')) +
+          row('FILE_ID', esc(meta.fileId||'')) +
+          row('URL', esc(meta.url||'')) +
+          row('Email Enabled', meta.email && meta.email.enabled ? 'Yes' : 'No') +
+          '</table>';
+        var envBlock = '<div class="p-banner"><h4 style="margin:8px 0;">Environment '+badge(true)+'<button class="btn-ghost" data-copy="diag-env" type="button" style="margin-left:8px">Copy</button></h4></div>'+hdrTable;
+        root.innerHTML = envBlock + blocks.join('');
+      }
+
+      function runDiagnostics(){
+        $('diagMeta').textContent = 'Running…';
+        $('diagRoot').innerHTML = '<div class="meta">Running diagnostics…</div>';
+
+        var meta = {}, blocks = [];
+        var pending = 5;
+
+        function done(){
+          pending--;
+          if(pending<=0){
+            renderPanel(meta, blocks);
+            $('diagMeta').textContent = 'Done';
+          }
+        }
+
+        // Env ping
+        google.script.run
+          .withSuccessHandler(function(p){ meta = p||{}; })
+          .withFailureHandler(function(){ meta = {}; })
+          .diag_ping();
+
+        // SSR Probe
+        google.script.run
+          .withSuccessHandler(function(ssr){
+            var ok = !!(ssr && ssr.ok);
+            var html =
+              '<table style="border-collapse:collapse;margin:6px 0;">' +
+              row('Keys', String(ssr && ssr.keys ? ssr.keys.length : 0)) +
+              row('Counts', '<pre style="white-space:pre-wrap;margin:6px 0;background:#fafafa;border:1px solid #eee;padding:8px;max-height:320px;overflow:auto;">'+esc(codePretty(ssr && ssr.counts || {}))+'</pre>') +
+              '</table>';
+            var payload = { ok: !!ok, keys: (ssr&&ssr.keys)||[], counts:(ssr&&ssr.counts)||{} };
+            blocks.push(blockHTML('diag-ssr','SSR Probe', ok, html, payload));
+            done();
+          })
+          .withFailureHandler(function(e){
+            var payload = { ok:false, error: String(e && (e.message||e)) };
+            blocks.push(blockHTML('diag-ssr','SSR Probe', false, '<div class="meta">SSR probe failed.</div>', payload));
+            done();
+          })
+          .diag_ssrProbe();
+
+        // Header Validator
+        google.script.run
+          .withSuccessHandler(function(h){
+            var okh = !!(h && h.ok);
+            var rows = (h && h.results ? h.results : []).map(function(r){
+              var status = r.ok ? 'OK' : ('Missing: '+(r.missing||[]).join(', '));
+              return row(r.sheet, esc(status));
+            }).join('');
+            var html = '<table style="border-collapse:collapse;margin:6px 0;">'+rows+'</table>';
+            blocks.push(blockHTML('diag-headers','Header Validator', okh, html, h||{}));
+            done();
+          })
+          .withFailureHandler(function(e){
+            var payload = { ok:false, error:String(e && (e.message||e)) };
+            blocks.push(blockHTML('diag-headers','Header Validator', false, '<div class="meta">Header validator failed.</div>', payload));
+            done();
+          })
+          .diag_headers();
+
+        // Data Integrity
+        google.script.run
+          .withSuccessHandler(function(integ){
+            var oki = !!(integ && integ.ok);
+            var html = '<pre style="white-space:pre-wrap;margin:6px 0;background:#fafafa;border:1px solid #eee;padding:8px;max-height:420px;overflow:auto;">'+esc(codePretty(integ||{}))+'</pre>';
+            blocks.push(blockHTML('diag-integrity','Data Integrity', oki, html, integ||{}));
+            done();
+          })
+          .withFailureHandler(function(e){
+            var payload = { ok:false, error:String(e && (e.message||e)) };
+            blocks.push(blockHTML('diag-integrity','Data Integrity', false, '<div class="meta">Integrity check failed.</div>', payload));
+            done();
+          })
+          .diag_integrity();
+
+        // Email Status (enabled only)
+        google.script.run
+          .withSuccessHandler(function(em){
+            meta.email = em || {};
+            var html =
+              '<table style="border-collapse:collapse;margin:6px 0;">' +
+              row('Enabled', (em && em.enabled) ? 'Yes' : 'No') +
+              '</table>';
+            blocks.push(blockHTML('diag-email','Email Status', true, html, em||{}));
+            done();
+          })
+          .withFailureHandler(function(e){
+            var payload = { ok:false, error:String(e && (e.message||e)) };
+            blocks.push(blockHTML('diag-email','Email Status', false, '<div class="meta">Email status failed.</div>', payload));
+            done();
+          })
+          .diag_emailStatus();
+
+        // RPC Smoke
+        google.script.run
+          .withSuccessHandler(function(sm){
+            var oks = !!(sm && sm.ok);
+            var html = '<pre style="white-space:pre-wrap;margin:6px 0;background:#fafafa;border:1px solid #eee;padding:8px;max-height:420px;overflow:auto;">'+esc(codePretty(sm||{}))+'</pre>';
+            blocks.push(blockHTML('diag-rpc','RPC Smoke', oks, html, sm||{}));
+            done();
+          })
+          .withFailureHandler(function(e){
+            var payload = { ok:false, error:String(e && (e.message||e)) };
+            blocks.push(blockHTML('diag-rpc','RPC Smoke', false, '<div class="meta">RPC smoke failed.</div>', payload));
+            done();
+          })
+          .diag_rpcSmoke();
+      }
+
+      document.addEventListener('click', function(ev){
+        var t = ev.target;
+        if(t && t.getAttribute && t.getAttribute('data-copy')){
+          var id = t.getAttribute('data-copy');
+          var txt = (window.__diagPayloads && window.__diagPayloads[id]) || '';
+          if(txt) copyText(txt); else toast('Nothing to copy', true);
+        }
+      });
+
+      var b = $('btnDiag'); if(b){ b.addEventListener('click', function(){ var isDiag = (qs('view')==='diag'); show(isDiag ? '' : 'diag'); }); }
+      var br = $('btnDiagRefresh'); if(br){ br.addEventListener('click', runDiagnostics); }
+      var bb = $('btnDiagBack'); if(bb){ bb.addEventListener('click', function(){ show(''); }); }
+
+      show(qs('view'));
+    })();
+  </script>
+
+  <!-- About button -->
+  <script>
+    (function(){
+      var btn = document.getElementById('btnAbout');
+      if(!btn) return;
+      btn.addEventListener('click', function(){
+        try{
+          var init = JSON.parse(document.getElementById('__INITIAL__').textContent||'{}')||{};
+          var pieces = ['OBSI Support Console'];
+          if(init.build) pieces.push('Build: ' + init.build);
+          if(init.url)   pieces.push('URL: ' + init.url);
+          var msg = pieces.join(' — ');
+          var n = document.getElementById('notice');
+          if(n){
+            n.textContent = msg;
+            n.className='noticebar show';
+            setTimeout(function(){ n.className='noticebar'; }, 2200);
+          }
+        }catch(_){}
+      });
+    })();
+  </script>
+
+  <!-- Footer year -->
+  <script>
+    (function(){
+      var y=document.getElementById('cpyYear');
+      if(y) y.textContent=(new Date()).getFullYear();
+    })();
+  </script>
+</body>
+</html>

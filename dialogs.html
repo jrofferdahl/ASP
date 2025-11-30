@@ -1,0 +1,106 @@
+<!-- Dialog fragments -->
+<!-- Record Add/Edit dialog (used for Support Ticket records; unchanged) -->
+<dialog id="dlgRecord">
+  <div class="modal">
+    <header><strong id="dlgRec_title">Add Record</strong></header>
+    <div class="body">
+      <div class="row">
+        <label>Engineer <select id="dlgRec_engineer"></select></label>
+        <label>Start <input id="dlgRec_start" type="time" /></label>
+        <label>End <input id="dlgRec_end" type="time" /></label>
+        <label>Perf / Due Date <input id="dlgRec_perf" type="date" /></label>
+      </div>
+      <div class="row"><textarea id="dlgRec_note" placeholder="Note / Work performed..."></textarea></div>
+      <div class="muted" id="dlgRec_total"></div>
+    </div>
+    <div class="foot">
+      <button class="btn-ghost" id="dlgRec_cancel" type="button">Cancel</button>
+      <button class="btn" id="dlgRec_save" type="button">Save</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Work Order Task dialog (UPDATED) -->
+<!-- Title changed to "Enter New Task", engineer/start/end removed, Due Date (date-only) added (default set by JS) -->
+<dialog id="dlgWOTask">
+  <div class="modal">
+    <header><strong id="dlgWOTask_title">Enter New Task</strong></header>
+    <div class="body">
+      <div class="row">
+        <div style="flex:1">
+          <textarea id="dlgWOTask_note" placeholder="Describe the task..." rows="6" style="width:100%"></textarea>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <label style="display:flex;align-items:center;">Due Date&nbsp;
+          <input id="dlgWOTask_due" type="date" style="margin-left:8px;" />
+        </label>
+      </div>
+      <div class="muted">This will create a WorkOrderRecord (task) with the text and a due date. Engineer, start and end times are not set here.</div>
+    </div>
+    <div class="foot">
+      <button class="btn-ghost" id="dlgWOTask_cancel" type="button">Cancel</button>
+      <button class="btn" id="dlgWOTask_save" type="button">Save</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Assign / Schedule dialog -->
+<dialog id="dlgAssign">
+  <div class="modal">
+    <header><strong id="dlgAssign_title">Assign / Schedule</strong></header>
+    <div class="body">
+      <div class="row" id="rowEngineer"><label>Engineer <select id="dlgAssignEngineer"></select></label></div>
+      <div class="row" id="rowDate"><label>Schedule Date <input id="dlgAssignDate" type="date" /></label><div class="muted">Saved as date-only (no time).</div></div>
+    </div>
+    <div class="foot">
+      <button class="btn-ghost" id="dlgAssign_cancel" type="button">Cancel</button>
+      <button class="btn" id="dlgAssign_action" type="button">Save</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Itinerary email dialog -->
+<dialog id="dlgItinerary">
+  <div class="modal">
+    <header><strong>Email Itinerary</strong></header>
+    <div class="body">
+      <div class="row">
+        <label>Engineer <select id="itinEngineer"></select></label>
+        <label>Start Date <input id="itinStart" type="date" /></label>
+        <label>End Date <input id="itinEnd" type="date" /></label>
+      </div>
+      <div class="row">
+        <label>To <input id="itinTo" type="email" placeholder="recipient@example.com" /></label>
+        <label>CC <input id="itinCc" type="email" /></label>
+        <label>BCC <input id="itinBcc" type="email" /></label>
+      </div>
+      <div class="row">
+        <div style="flex:1">
+          <div class="muted">Also notify engineers (added to CC):</div>
+          <div id="itinExtras" class="pickers"></div>
+        </div>
+      </div>
+      <div class="muted">Includes Work Orders for the engineer with <em>ScheduledDate</em> in range (inclusive).</div>
+    </div>
+    <div class="foot">
+      <button class="btn-ghost" id="dlgItin_cancel" type="button">Cancel</button>
+      <button class="btn" id="dlgItin_send" type="button">Send</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Email Engineer (extras) dialog -->
+<dialog id="dlgEmailEng">
+  <div class="modal">
+    <header><strong>Email Engineer</strong></header>
+    <div class="body">
+      <div class="muted">Assigned engineer will be in To:. Select any additional engineers to CC:</div>
+      <div id="engExtras" class="pickers"></div>
+    </div>
+    <div class="foot">
+      <button class="btn-ghost" id="dlgEmailEng_cancel" type="button">Cancel</button>
+      <button class="btn" id="dlgEmailEng_send" type="button">Send Email</button>
+    </div>
+  </div>
+</dialog>

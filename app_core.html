@@ -1,0 +1,889 @@
+<script>
+/** app_core.html — Full client core (complete)
+ *  - Deferred boot (DOM ready)
+ *  - Defensive wiring (guards for missing elements)
+ *  - All render / formatter / picker / CSV / dialog wiring included
+ *  - Work Order "Enter New Task" dialog wired (dlgWOTask) — text + due date (defaults +1 month)
+ */
+(function(){
+  const $ = id => document.getElementById(id);
+
+  function boot(){
+    const notice = $('notice'), errbar = $('errbar');
+    function flash(msg){ if(notice){ notice.textContent = msg; notice.className='noticebar show'; setTimeout(()=>notice.className='noticebar',2000);} }
+    function showErr(msg){ if(errbar){ errbar.textContent = 'Error: ' + (msg && msg.message ? msg.message : msg); errbar.className='errbar show'; } else { console.error(msg); } }
+    function ck(tag){ console.log('[core]', tag); /* flash(tag); */ }
+
+    try {
+      // Basic exports so other modules can query early
+      window._obsiCore = window._obsiCore || { gas:function(){}, initial:{build:'INIT',url:''}, state:{}, render:function(){}, applyVisibility:function(){}, hydrateEntry:function(){} };
+      window._obsiUX   = window._obsiUX   || { flash, showErr, pulseOk:(el)=>{ if(!el)return; el.classList.remove('pulse-ok'); void el.offsetWidth; el.classList.add('pulse-ok'); } };
+
+      ck('diag: core bootstrap');
+
+      function gas(fnName, ...args){
+        return new Promise((resolve, reject)=>
+          google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fnName](...args)
+        );
+      }
+
+      const S2 = x => (x==null ? '' : String(x));
+      function fmtMDY(d){
+        if(!d) return '';
+        const dt=(d instanceof Date)?d:new Date(d);
+        if(isNaN(dt)) return '';
+        const mm=String(dt.getMonth()+1).padStart(2,'0');
+        const dd=String(dt.getDate()).padStart(2,'0');
+        const yy=dt.getFullYear();
+        return `${mm}/${dd}/${yy}`;
+      }
+      function fmtHM(t){
+        const s=S2(t).trim();
+        if(!s) return '';
+        const m=s.match(/^(\d{1,2}):(\d{2})$/);
+        if(!m) return '';
+        const H=+m[1], M=+m[2];
+        if(H>23||M>59) return '';
+        return `${String(H).padStart(2,'0')}:${String(M).padStart(2,'0')}`;
+      }
+      function toISOfromDDMMYY(s){
+        if(!s) return '';
+        const m=String(s).split('/');
+        if(m.length!==3) return '';
+        const dd=+m[0], mm=+m[1], yy=+m[2];
+        const Y=(yy<100?2000+yy:yy);
+        const d=new Date(Y,mm-1,dd);
+        return isNaN(d)?'':`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      }
+      function perfToMDY(perf){
+        if(!perf) return '';
+        if(perf instanceof Date) return fmtMDY(perf);
+        const s=S2(perf).trim();
+        let m=s.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
+        if(m){
+          const dd=+m[1],mo=+m[2],yy=2000+(+m[3]);
+          return fmtMDY(new Date(yy,mo-1,dd,12));
+        }
+        m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if(m){
+          const mo=+m[1],dd=+m[2],yy=+m[3];
+          return fmtMDY(new Date(yy,mo-1,dd,12));
+        }
+        return fmtMDY(new Date(s));
+      }
+
+      // Safe ISO (YYYY-MM-DD) → local Date (no UTC drift)
+      function safeISOToLocalDate(iso){
+        const s = S2(iso);
+        if(!s) return null;
+        const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if(m){
+          const Y = +m[1], M = +m[2], D = +m[3];
+          // Noon local to avoid DST/UTC edge weirdness
+          return new Date(Y, M - 1, D, 12, 0, 0, 0);
+        }
+        const d = new Date(s);
+        return isNaN(d) ? null : d;
+      }
+
+      ck('diag: formatters ready');
+
+      // Hydrate SSR payload
+      let RAW={};
+      try { RAW = JSON.parse(document.getElementById('__INITIAL__').textContent||'{}'); } catch(e){ throw new Error('SSR parse failed: '+e.message); }
+      const initial={
+        build:RAW.build||'', url:RAW.url||'',
+        clients:RAW.clients||[], markets:RAW.markets||[], callsigns:RAW.callsigns||[],
+        engineers:RAW.engineers||[], contacts:RAW.contacts||[],
+        clientContacts:RAW.clientContacts||[],
+        tickets:RAW.tickets||[], supportRecords:RAW.supportRecords||[],
+        workorders:RAW.workorders||[], workOrderRecords:RAW.workOrderRecords||[]
+      };
+      window._obsiCore.initial = initial;
+      const cpy = $('cpyYear'); if(cpy) cpy.textContent = new Date().getFullYear();
+
+      ck('diag: SSR hydrated');
+
+      // Initialize state
+      const state={
+        tSort:'lastdesc', wSort:'lastdesc',
+        filters:{clientId:'',marketId:'',callSign:'',engName:'',status:'active', search:''},
+        link:{ticketId:'',woId:''},
+        editT:false, editW:false,
+        selSTRecTS:'', selWORecID:'',
+        focus:null
+      };
+      window._obsiCore.state = state;
+
+      // Cached elements (may be null if layout missing)
+      const fC=$('fClient'), fM=$('fMarket'), fS=$('fStatus'), fCall=$('fCall'), fE=$('fEng'), fSearch=$('fSearch');
+      const stSortSel = $('stSort');
+      const woSortSel = $('woSort');
+
+      // PICKER BUILDERS
+      function buildClients(){
+        if(!fC) return;
+        fC.innerHTML='';
+        fC.append(new Option('(All Clients)',''));
+        (initial.clients||[]).slice().sort((a,b)=>S2(a.ClientName).localeCompare(S2(b.ClientName)))
+          .forEach(c=> fC.append(new Option(S2(c.ClientName||c.ClientID), S2(c.ClientID))));
+      }
+      function buildMarkets(){
+        if(!fM) return;
+        const cid=state.filters.clientId;
+        const mk=(initial.markets||[])
+          .filter(m=>cid?S2(m.ClientID)===cid:true)
+          .slice()
+          .sort((a,b)=>S2(a.MarketName||a.MarketID).localeCompare(S2(b.MarketName||b.MarketID)));
+        fM.innerHTML='';
+        fM.append(new Option('(All Markets)',''));
+        mk.forEach(m=> fM.append(new Option(S2(m.MarketName||m.MarketID), S2(m.MarketID))));
+      }
+      function buildCalls(){
+        if(!fCall) return;
+        const set=new Set(), cid=state.filters.clientId, mid=state.filters.marketId;
+        (initial.tickets||[]).forEach(t=>{
+          if(cid&&S2(t.ClientID)!==cid) return;
+          if(mid&&S2(t.MarketID)!==mid) return;
+          const cs=S2(t.CallSign||t.Station).toUpperCase();
+          if(cs) set.add(cs);
+        });
+        (initial.workorders||[]).forEach(w=>{
+          if(cid&&S2(w.ClientID)!==cid) return;
+          if(mid&&S2(w.MarketID)!==mid) return;
+          const cs=S2(w.CallSign).toUpperCase();
+          if(cs) set.add(cs);
+        });
+        const list=[...set].sort((a,b)=>a.localeCompare(b));
+        fCall.innerHTML='';
+        fCall.append(new Option('(All Stations)',''));
+        list.forEach(cs=>fCall.append(new Option(cs,cs)));
+      }
+      function buildEngineers(){
+        if(!fE) return;
+        const set=new Set();
+        (initial.tickets||[]).forEach(t=>{
+          const n=S2(t.EngineerName).trim();
+          if(n) set.add(n);
+        });
+        (initial.workorders||[]).forEach(w=>{
+          const n=S2(w.EngineerName).trim();
+          if(n) set.add(n);
+        });
+        const list=[...set].sort((a,b)=>a.localeCompare(b));
+        fE.innerHTML='';
+        fE.append(new Option('(All Engineers)',''));
+        list.forEach(n=>fE.append(new Option(n,n)));
+      }
+
+      // Wire picker events (defensive)
+      if(fC) fC.onchange=()=>{
+        state.filters.clientId=fC.value||'';
+        state.filters.marketId='';
+        state.filters.callSign='';
+        state.focus=null;
+        buildMarkets();
+        buildCalls();
+        buildEngineers();
+        render();
+      };
+      if(fM) fM.onchange=()=>{
+        state.filters.marketId=fM.value||'';
+        state.filters.callSign='';
+        state.focus=null;
+        buildCalls();
+        buildEngineers();
+        render();
+      };
+      if(fCall) fCall.onchange=()=>{
+        state.filters.callSign=fCall.value||'';
+        state.focus=null;
+        render();
+      };
+      if(fE) fE.onchange=()=>{
+        state.filters.engName=fE.value||'';
+        state.focus=null;
+        render();
+      };
+      if(fS) fS.onchange=()=>{
+        state.filters.status=fS.value;
+        render();
+      };
+      if(fSearch) fSearch.oninput = ()=>{
+        state.filters.search = fSearch.value||'';
+        render();
+      };
+
+      const btnClear = $('btnClearFilters');
+      if(btnClear) btnClear.onclick = async (e)=>{
+        e.preventDefault();
+        window._obsiUX.pulseOk(e.currentTarget);
+        state.filters={clientId:'',marketId:'',callSign:'',engName:'',status:'active',search:''};
+        if(fC) fC.value='';
+        if(fM) fM.value='';
+        if(fCall) fCall.value='';
+        if(fE) fE.value='';
+        if(fS) fS.value='active';
+        if(fSearch) fSearch.value='';
+
+        state.focus=null;
+        state.link={ticketId:'',woId:''};
+        state.selSTRecTS='';
+        state.selWORecID='';
+        state.editT=false;
+        state.editW=false;
+
+        const tr=$('ticketsRec'), wr=$('woRec');
+        if(tr) tr.innerHTML='<span class="meta">Ticket records will appear here…</span>';
+        if(wr) wr.innerHTML='<span class="meta">Tasks will appear here…</span>';
+
+        const core = window._obsiCore;
+        if(core && typeof core.fullRefreshAndRepaint === 'function'){
+          await core.fullRefreshAndRepaint();
+        }else{
+          buildClients();
+          buildMarkets();
+          buildCalls();
+          buildEngineers();
+          render();
+          applyVisibility();
+          hydrateEntry();
+        }
+        flash('Filters cleared');
+      };
+
+      ck('diag: pickers wired');
+
+      // Sort pickers
+      if (stSortSel) {
+        stSortSel.value = state.tSort || 'lastdesc';
+        stSortSel.onchange = () => { state.tSort = stSortSel.value || 'lastdesc'; render(); };
+      }
+      if (woSortSel) {
+        woSortSel.value = state.wSort || 'lastdesc';
+        woSortSel.onchange = () => { state.wSort = woSortSel.value || 'lastdesc'; render(); };
+      }
+
+      function statusMatch(rs){
+        const s=state.filters.status;
+        if(s==='active') return rs!=='DELETED'&&rs!=='CLOSED';
+        if(!s) return true;
+        return String(rs||'').toUpperCase()===s.toUpperCase();
+      }
+      function searchMatchTicket(t){
+        const q=(state.filters.search||'').trim().toLowerCase();
+        if(!q) return true;
+        const hay=[
+          S2(t.RequestedBy||''),S2(t.RequestedByName||''),S2(t.SupportRequest||''),S2(t.ClientName||''),S2(t.MarketName||''),S2(t.CallSign||'')
+        ].join(' ').toLowerCase();
+        return hay.includes(q);
+      }
+      function searchMatchWO(w){
+        const q=(state.filters.search||'').trim().toLowerCase();
+        if(!q) return true;
+        const hay=[
+          S2(w.WorkOrderText||''),S2(w.EngineerName||''),S2(w.ClientName||''),S2(w.MarketName||''),S2(w.CallSign||'')
+        ].join(' ').toLowerCase();
+        return hay.includes(q);
+      }
+
+      function sortTk(a){
+        switch(state.tSort){
+          case'lastasc':return a.slice().sort((x,y)=>Date.parse(x.LastUpdate)-Date.parse(y.LastUpdate));
+          case'lastdesc':return a.slice().sort((x,y)=>Date.parse(y.LastUpdate)-Date.parse(x.LastUpdate));
+          case'status':return a.slice().sort((x,y)=>S2(x.Status).localeCompare(S2(y.Status)));
+          case'station':return a.slice().sort((x,y)=>S2(x.CallSign||x.Station).toUpperCase().localeCompare(S2(y.CallSign||y.Station).toUpperCase()));
+          default:return a;
+        }
+      }
+      function sortWo(a){
+        switch(state.wSort){
+          case'lastasc':return a.slice().sort((x,y)=>Date.parse(x.LastUpdate)-Date.parse(y.LastUpdate));
+          case'lastdesc':return a.slice().sort((x,y)=>Date.parse(y.LastUpdate)-Date.parse(x.LastUpdate));
+          case'status':return a.slice().sort((x,y)=>S2(x.Status).localeCompare(S2(y.Status)));
+          case'id':return a.slice().sort((x,y)=>S2(x.WorkOrderID).localeCompare(S2(y.WorkOrderID)));
+          default:return a;
+        }
+      }
+
+      function apply(){
+        const f=state.filters;
+        const tk=(initial.tickets||[]).filter(t=>
+          (!f.clientId||S2(t.ClientID)===f.clientId) &&
+          (!f.marketId||S2(t.MarketID)===f.marketId) &&
+          (!f.callSign||S2(t.CallSign||t.Station).toUpperCase()===f.callSign) &&
+          (!f.engName||S2(t.EngineerName)===f.engName) &&
+          statusMatch(String(t.Status||'').toUpperCase()) &&
+          searchMatchTicket(t)
+        );
+
+        const wo=(initial.workorders||[]).filter(w=>
+          (!f.clientId||S2(w.ClientID)===f.clientId) &&
+          (!f.marketId||S2(w.MarketID)===f.marketId) &&
+          (!f.callSign||S2(w.CallSign).toUpperCase()===f.callSign) &&
+          (!f.engName||S2(w.EngineerName)===f.engName) &&
+          statusMatch(String(w.Status||'').toUpperCase()) &&
+          searchMatchWO(w)
+        );
+
+        if(state.focus && state.focus.ticketId){
+          const tid=state.focus.ticketId;
+          const one=tk.find(t=>S2(t.TicketID)===tid)||tk.find(t=>S2(t.TicketID)===tid);
+          const wos=wo.filter(w=>S2(w.TicketID)===tid);
+          return { tk: sortTk(one?[one]:[]), wo: sortWo(wos) };
+        }
+        return { tk: sortTk(tk), wo: sortWo(wo) };
+      }
+
+      // CSV export
+      function csvEscape(s){
+        const v=S2(s);
+        return (v.includes('"')||v.includes(',')||v.includes('\n')||v.includes('\r')) ? `"${v.replace(/"/g,'""')}"` : v;
+      }
+      function buildTicketsCSV(list){
+        const headers=['TicketID','ClientName','MarketName','CallSign','RequestedByType','RequestedByID','RequestedByName','RequestedByEmail','EngineerName','Priority','Status','LastUpdate','SupportRequest'];
+        const rows=list.map(t=>[
+          t.TicketID,t.ClientName,t.MarketName,(t.CallSign||'').toUpperCase(),t.RequestedByType||'',t.RequestedByID||'',t.RequestedByName||t.RequestedBy||'',t.RequestedByEmail||t.ContactEmail||'',t.EngineerName||'',t.Priority||'',t.Status||'',t.LastUpdate?(fmtMDY(t.LastUpdate)+' '+fmtHM((new Date(t.LastUpdate)).toTimeString().slice(0,5))):'',S2(t.SupportRequest||'').replace(/\s+/g,' ').trim()
+        ]);
+        return [headers,...rows].map(r=>r.map(csvEscape).join(',')).join('\r\n');
+      }
+      function buildWorkOrdersCSV(list){
+        const headers=['WorkOrderID','TicketID','ClientName','MarketName','CallSign','EngineerName','Status','ScheduledDate','LastUpdate','WorkOrderText'];
+        const rows=list.map(w=>{
+          const sched=w.ScheduledDate?fmtMDY(new Date(w.ScheduledDate)):'';
+          const last=w.LastUpdate?(fmtMDY(w.LastUpdate)+' '+fmtHM((new Date(w.LastUpdate)).toTimeString().slice(0,5))):'';
+          return [w.WorkOrderID,w.TicketID||'',w.ClientName,w.MarketName,(w.CallSign||'').toUpperCase(),w.EngineerName||'',w.Status||'',sched,last,S2(w.WorkOrderText||'').replace(/\s+/g,' ').trim()];
+        });
+        return [headers,...rows].map(r=>r.map(csvEscape).join(',')).join('\r\n');
+      }
+      function downloadCSV(filename,csv){
+        const a=document.createElement('a');
+        a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
+        a.download=filename;
+        document.body.appendChild(a);
+        a.click();
+        requestAnimationFrame(()=>document.body.removeChild(a));
+      }
+      function exportTickets(){ const sets=apply(); downloadCSV(`Tickets_${new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')}.csv`, buildTicketsCSV(sets.tk)); flash(`Exported ${sets.tk.length} tickets`); }
+      function exportWorkOrders(){ const sets=apply(); downloadCSV(`WorkOrders_${new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')}.csv`, buildWorkOrdersCSV(sets.wo)); flash(`Exported ${sets.wo.length} work orders`); }
+
+      // Wire export buttons defensively
+      const btnExportTk = $('btnExportTk');
+      const btnExportWo = $('btnExportWo');
+      if(btnExportTk) btnExportTk.onclick = (e)=>{ e.preventDefault(); window._obsiUX.pulseOk(e.currentTarget); exportTickets(); };
+      if(btnExportWo) btnExportWo.onclick = (e)=>{ e.preventDefault(); window._obsiUX.pulseOk(e.currentTarget); exportWorkOrders(); };
+
+      // RENDERERS
+      function render(){
+        const sets=apply();
+        const tC=$('tCount'), wC=$('wCount');
+        if(tC) tC.textContent=`(${sets.tk.length})`;
+        if(wC) wC.textContent=`(${sets.wo.length})`;
+        renderTk(sets.tk);
+        renderWo(sets.wo);
+        applyVisibility();
+      }
+
+      function renderTk(list){
+        const host=$('ticketsList');
+        if(!host) return;
+        host.innerHTML='';
+        if(!list.length){
+          host.innerHTML='<div class="meta">No tickets</div>';
+          return;
+        }
+        list.forEach(t=>{
+          const div=document.createElement('div');
+          div.className='item';
+          const last=t.LastUpdate?(fmtMDY(t.LastUpdate)+' '+fmtHM((new Date(t.LastUpdate)).toTimeString().slice(0,5))):'';
+          const client = S2(t.ClientName || '');
+          const call   = S2(t.CallSign || t.Station || '').toUpperCase();
+          div.innerHTML=
+            `<div><strong>${client}${client && call ? ' – ' : ''}${call || '(no station)'}</strong><span class="badge">${S2(t.Status)}</span></div>
+             <div class="meta">Requested By: ${S2(t.RequestedByName||t.RequestedBy||'(unknown)')}</div>
+             <div class="meta">${S2(t.SupportRequest).slice(0,200)}</div>
+             <div class="meta">Last: ${last}</div>`;
+          div.addEventListener('click', ()=>{
+            state.focus={ticketId:S2(t.TicketID),from:'ST'};
+            state.link.ticketId=S2(t.TicketID);
+            state.selSTRecTS='';
+            state.link.woId='';
+            state.selWORecID='';
+            state.editW=false;
+            const wr=$('woRec');
+            if(wr) wr.innerHTML='<span class="meta">Tasks will appear here…</span>';
+            render();
+          });
+          host.appendChild(div);
+        });
+        if(state.focus?.ticketId){
+          const tSel=(initial.tickets||[]).find(x=>S2(x.TicketID)===state.focus.ticketId);
+          if(tSel && state.link.ticketId) paintTkDetail(tSel);
+        }
+      }
+
+      function renderWo(list){
+        const host=$('woList');
+        if(!host) return;
+        host.innerHTML='';
+        if(!list.length){
+          host.innerHTML='<div class="meta">No work orders</div>';
+          return;
+        }
+        list.forEach(w=>{
+          const iso=w.ScheduledDate?safeISOToLocalDate(w.ScheduledDate):null;
+          const sched=iso?fmtMDY(iso):'';
+          const last=w.LastUpdate?(fmtMDY(w.LastUpdate)+' '+fmtHM((new Date(w.LastUpdate)).toTimeString().slice(0,5))):'';
+          const client = S2(w.ClientName || '');
+          const call   = S2(w.CallSign || '').toUpperCase();
+          const eng    = S2(w.EngineerName || '(unassigned)');
+          const div=document.createElement('div');
+          div.className='item';
+          div.dataset.woid = S2(w.WorkOrderID||'');
+          div.innerHTML=
+            `<div><strong>${client}${client && call ? ' – ' : ''}${call || '(no call sign)'}</strong><span class="badge">${S2(w.Status)}</span></div>
+             <div class="meta">${S2(w.WorkOrderText).slice(0,200)}</div>
+             <div class="meta">Last: ${last}${sched?' · Sched: '+sched:''} · Eng: ${eng}</div>`;
+          div.addEventListener('click', ()=>{
+            const tid=S2(w.TicketID);
+            state.focus={ticketId:tid,from:'WO'};
+            state.link.woId=S2(w.WorkOrderID);
+            state.selWORecID='';
+            state.link.ticketId=tid;
+            state.selSTRecTS='';
+            state.editT=false;
+            const tr=$('ticketsRec');
+            if(tr) tr.innerHTML='<span class="meta">Ticket records will appear here…</span>';
+            render();
+          });
+          host.appendChild(div);
+        });
+        if(state.focus?.ticketId && state.link.woId){
+          const w2=(initial.workorders||[]).find(x=>S2(x.WorkOrderID)===state.link.woId);
+          if(w2) paintWoDetail(w2);
+        }
+      }
+
+      function renderCommonRecords(rs, isWO){
+        const label = isWO ? 'Due' : 'Perf';
+        return rs.length
+          ? rs.map(x=>{
+              const ts=S2(x.Timestamp);
+              const who=S2(x.EngineerName);
+              const note=isWO?S2(x.WorkPerformed):S2(x.SupportProvided);
+              const st=fmtHM(S2(x.StartTime));
+              const en=fmtHM(S2(x.EndTime));
+              const tot=S2(x.TotalTime);
+              const pf=isWO?S2(x.PerfDate):S2(x.PerFdate);
+              const perfMDY=perfToMDY(pf);
+              const tsMDY=ts?fmtMDY(new Date(ts)):'';
+
+              if (isWO) {
+                // WO rows: no literal "Start:", "End:", "Total:" labels — show values separated by " · "
+                const parts = [];
+                if (st) parts.push(st);
+                if (en) parts.push(en);
+                if (tot) parts.push(tot);
+                // Always include the perf/due label as last element (may be empty)
+                parts.push(`${label}: ${perfMDY||''}`);
+                return `<div class="item rec" data-wrid="${S2(x.WorkRecordID)}">
+                          <div class="meta">${tsMDY} · ${who}</div>
+                          <div>${note}</div>
+                          <div class="meta">${parts.filter(p=>p && p.trim()).join(' · ')}</div>
+                        </div>`;
+              } else {
+                // ST rows: keep original labels (no change)
+                return `<div class="item rec" data-stts="${ts}">
+                          <div class="meta">${tsMDY} · ${who}</div>
+                          <div>${note}</div>
+                          <div class="meta">Start: ${st||''} · End: ${en||''} · Total: ${tot||''} · ${label}: ${perfMDY||''}</div>
+                        </div>`;
+              }
+            }).join('')
+          : (isWO ? '<div class="meta">No tasks yet.</div>' : '<div class="meta">No records.</div>');
+      }
+
+      function debugToast(msg){
+        if(window.showAppToast){
+          window.showAppToast(msg, false);
+        }else{
+          console.log('[debugToast]', msg);
+        }
+      }
+
+      // paint detail functions
+      function paintTkDetail(t){
+        const tid=S2(t.TicketID);
+        const showDeleted=(state.filters.status||'').toUpperCase()==='DELETED';
+        const allRecs = (initial.supportRecords||[]);
+        const rs=(allRecs)
+          .filter(r=>S2(r.TicketID)===tid)
+          .filter(r=>showDeleted ? true : !(S2(r.Status).toUpperCase()==='DELETED' || S2(r.SupportProvided).startsWith('[DELETED]')))
+          .sort((a,b)=>Date.parse(a.Timestamp||0)<Date.parse(b.Timestamp||0)?1:-1);
+
+        console.log('[paintTkDetail] ticketId=%s totalSupportRecords=%d filteredForTicket=%d', tid, allRecs.length, rs.length);
+        debugToast('Debug: ST recs for ' + tid + ' = ' + rs.length);
+
+        const host=$('ticketsRec');
+        if(!host) return;
+
+        const client = S2(t.ClientName || '');
+        const call   = S2(t.CallSign || t.Station || '').toUpperCase();
+
+        host.innerHTML=
+          (state.editT?`<div class="row"><textarea id="tEdit">${S2(t.SupportRequest)}</textarea></div>`:'')+
+          `<div class="meta"><strong>${client}${client && call ? ' – ' : ''}${call || '(no station)'}</strong></div>`+
+          renderCommonRecords(rs,false);
+
+        document.querySelectorAll('#ticketsRec .item.rec').forEach(el=>{
+          el.onclick=()=>{
+            state.selSTRecTS=el.getAttribute('data-stts');
+            applyVisibility();
+          };
+        });
+      }
+
+      function paintWoDetail(w){
+        const wid=S2(w.WorkOrderID);
+        const showDeleted=(state.filters.status||'').toUpperCase()==='DELETED';
+        const rs=(initial.workOrderRecords||[])
+          .filter(r=>S2(r.WorkOrderID)===wid)
+          .filter(r=>showDeleted ? true : !(S2(r.Status).toUpperCase()==='DELETED' || S2(r.WorkPerformed).startsWith('[DELETED]')))
+          .sort((a,b)=>Date.parse(a.TimeStamp||a.Timestamp||0)<Date.parse(b.TimeStamp||b.Timestamp||0)?1:-1);
+        const host=$('woRec');
+        if(!host) return;
+
+        const client = S2(w.ClientName || '');
+        const call   = S2(w.CallSign || '').toUpperCase();
+        const eng    = S2(w.EngineerName || '(unassigned)');
+
+        host.innerHTML=
+          (state.editW?`<div class="row"><textarea id="wEdit">${S2(w.WorkOrderText)}</textarea></div>`:'')+
+          `<div class="meta"><strong>${client}${client && call ? ' – ' : ''}${call}</strong></div>
+           <div class="meta">Engineer: ${eng}</div>`+
+          renderCommonRecords(rs,true);
+
+        document.querySelectorAll('#woRec .item.rec').forEach(el=>{
+          el.onclick = function(){
+            state.selWORecID = el.getAttribute('data-wrid');
+            applyVisibility();
+          };
+        });
+      }
+
+      // visibility helpers
+      function hide(ids){ (ids||[]).forEach(id=>{ const el=$(id); if(el) el.style.display='none'; }); }
+      function show(ids){ (ids||[]).forEach(id=>{ const el=$(id); if(el) el.style.display='inline-flex'; }); }
+      function applyVisibility(){
+        const tSel=!!state.link.ticketId;
+        const trSel=!!state.selSTRecTS;
+        const wSel=!!state.link.woId;
+        const wrSel=!!state.selWORecID;
+
+        ['btnEditT','btnSaveT','btnAddSTModal','btnEscalate','btnPendingT','btnCloseT','btnDeleteT','btnClearST','btnEditSTRec','btnDeleteSTRec']
+          .forEach(id=>{ const el=$(id); if(el) el.style.display='none'; });
+
+        if(tSel && !trSel){
+          show(['btnEditT','btnAddSTModal','btnEscalate','btnPendingT','btnCloseT','btnDeleteT','btnClearST']);
+          const saveT=$('btnSaveT');
+          if(saveT) saveT.style.display= state.editT?'inline-flex':'none';
+        }else if(tSel && trSel){
+          show(['btnEditSTRec','btnDeleteSTRec','btnClearST']);
+        }
+
+        ['btnEditW','btnSaveW','btnAddWOModal','btnOpenAssign','btnOpenSchedule','btnEmailEngineer','btnEmailItinerary','btnCloseW','btnDeleteWO','btnClearWO','btnEditWORec','btnDeleteWORec']
+          .forEach(id=>{ const el=$(id); if(el) el.style.display='none'; });
+
+        if(wSel && !wrSel){
+          show(['btnEditW','btnAddWOModal','btnOpenAssign','btnOpenSchedule','btnEmailEngineer','btnEmailItinerary','btnCloseW','btnDeleteWO','btnClearWO']);
+          const saveW=$('btnSaveW');
+          if(saveW) saveW.style.display= state.editW?'inline-flex':'none';
+        }else if(wSel && wrSel){
+          show(['btnEditWORec','btnDeleteWORec','btnClearWO']);
+        }else{
+          const btn=$('btnEmailItinerary');
+          if(btn) btn.style.display='inline-flex';
+        }
+      }
+
+      // ENTRY pickers
+      const cClient=$('cClient'), cMarket=$('cMarket'), cCall=$('cCall'),
+            cPriority=$('cPriority'), cReqBy=$('cRequestedBy'), cReq=$('cRequest');
+
+      const byClientName=(a,b)=>S2(a.ClientName).localeCompare(S2(b.ClientName));
+      const byMarketName=(a,b)=>S2(a.MarketName).localeCompare(S2(b.MarketName));
+      const byCallSign  =(a,b)=>S2(a.CallSign).localeCompare(S2(b.CallSign));
+      const normalizeYes = v => {
+        const s=S2(v).trim().toUpperCase();
+        return s==='Y'||s==='YES'||s==='TRUE'||s==='1';
+      };
+
+      function mktsForClient(id){
+        return (initial.markets||[]).filter(m=>!id||S2(m.ClientID)===S2(id)).sort(byMarketName);
+      }
+      function callsFor(id, mid){
+        return (initial.callsigns||[]).filter(cs=>(!id||S2(cs.ClientID)===S2(id))&&(!mid||S2(cs.MarketID)===S2(mid))).sort(byCallSign);
+      }
+
+      const entryState = { clientId:'', marketId:'', callSign:'' };
+
+      function fillEntryClients(){
+        if(!cClient) return;
+        cClient.innerHTML='';
+        cClient.append(new Option('(Choose Client)',''));
+        (initial.clients||[]).slice().sort(byClientName).forEach(cl=>cClient.append(new Option(S2(cl.ClientName), S2(cl.ClientID))));
+        cClient.disabled=false;
+      }
+      function fillEntryMarkets(){
+        if(!cMarket) return;
+        cMarket.innerHTML='';
+        cMarket.append(new Option('(Choose Market)',''));
+        mktsForClient(entryState.clientId).forEach(m=>cMarket.append(new Option(S2(m.MarketName), S2(m.MarketID))));
+        cMarket.disabled=!entryState.clientId;
+      }
+      function fillEntryCallSigns(){
+        if(!cCall) return;
+        cCall.innerHTML='';
+        cCall.append(new Option('(Choose Station)',''));
+        callsFor(entryState.clientId, entryState.marketId).forEach(cs=>cCall.append(new Option(S2(cs.CallSign), S2(cs.CallSign))));
+        cCall.disabled=!entryState.marketId;
+      }
+      function fillEntryPriority(){
+        if(!cPriority) return;
+        cPriority.innerHTML='';
+        ['Low','Medium','High','EMERGENCY'].forEach(p=>cPriority.append(new Option(p,p)));
+        cPriority.value='Low';
+      }
+
+      function fillEntryRequestedBy(){
+        if(!cReqBy) return;
+        cReqBy.innerHTML='';
+        cReqBy.append(new Option('(Select requester)',''));
+
+        const src = Array.isArray(initial.clientContacts) ? initial.clientContacts : [];
+        const wantClient = S2(entryState.clientId).trim();
+        const wantMarket = S2(entryState.marketId).trim().toUpperCase();
+
+        const contacts = src.filter(r=>{
+          if(!wantClient) return false;
+          if(S2(r.ClientID).trim() !== wantClient) return false;
+          if(!wantMarket) return true;
+          const keys = Object.keys(r).filter(k => /^MarketID\s*\d+$/i.test(k));
+          return keys.some(k => S2(r[k]).trim().toUpperCase() === wantMarket);
+        }).sort((a,b)=>S2(a.ContactName||'').localeCompare(S2(b.ContactName||'')));
+
+        if(contacts.length){
+          const og=document.createElement('optgroup');
+          og.label='ClientContacts';
+          contacts.forEach(r=>{
+            const display = S2(r.ContactName||r.ContactEmail||'');
+            const o = new Option(display, display);
+            o.dataset.contactid = S2(r.ContactID||'');
+            o.dataset.email     = S2(r.ContactEmail||'');
+            og.appendChild(o);
+          });
+          cReqBy.appendChild(og);
+        }
+
+        const engs=(initial.engineers||[]).filter(e=>normalizeYes(e.Active)).sort((a,b)=>S2(a.EngineerName).localeCompare(S2(b.EngineerName)));
+        if(engs.length){
+          const og=document.createElement('optgroup');
+          og.label='Engineers';
+          cReqBy.appendChild(og);
+          engs.forEach(e=>{
+            const o=new Option(S2(e.EngineerName||e.EngineerID), S2(e.EngineerName||e.EngineerID));
+            o.dataset.engid=S2(e.EngineerID||'');
+            o.dataset.email=S2(e.EngineerEmail||e.Email||'');
+            og.appendChild(o);
+          });
+        }
+      }
+
+      function hydrateEntry(){
+        fillEntryClients();
+        fillEntryMarkets();
+        fillEntryCallSigns();
+        fillEntryPriority();
+        fillEntryRequestedBy();
+      }
+
+      if(cClient) cClient.onchange=()=>{
+        entryState.clientId=cClient.value;
+        entryState.marketId='';
+        entryState.callSign='';
+        fillEntryMarkets();
+        fillEntryCallSigns();
+        fillEntryRequestedBy();
+      };
+      if(cMarket) cMarket.onchange=()=>{
+        entryState.marketId=cMarket.value;
+        entryState.callSign='';
+        fillEntryCallSigns();
+        fillEntryRequestedBy();
+      };
+      if(cCall)   cCall.onchange  =()=>{
+        entryState.callSign=cCall.value;
+      };
+
+      ck('diag: pre-boot ok');
+
+      // export core API
+      window._obsiCore.gas = gas;
+      window._obsiCore.fmtMDY = fmtMDY;
+      window._obsiCore.fmtHM = fmtHM;
+      window._obsiCore.toISOfromDDMMYY = toISOfromDDMMYY;
+      window._obsiCore.S2 = S2;
+      window._obsiCore.safeISOToLocalDate = safeISOToLocalDate;
+      window._obsiCore.initial = initial;
+      window._obsiCore.state = state;
+      window._obsiCore.render = render;
+      window._obsiCore.applyVisibility = applyVisibility;
+      window._obsiCore.hydrateEntry = hydrateEntry;
+      window._obsiCore.openRecordDialog = null;
+
+      // export painters (if defined later)
+      window._obsiCore.paintTkDetail = paintTkDetail;
+      window._obsiCore.paintWoDetail = paintWoDetail;
+
+      // ------------------------------
+      // Work Order "Enter New Task" dialog wiring
+      // ------------------------------
+      function nextMonthISO(){
+        const d = new Date();
+        const m = d.getMonth();
+        // setMonth handles year rollover
+        d.setMonth(m + 1);
+        // return YYYY-MM-DD
+        return d.toISOString().slice(0,10);
+      }
+
+      function openWOTaskDialog(){
+        const dlg = $('dlgWOTask');
+        if(!dlg) return;
+        const note = $('dlgWOTask_note');
+        const due  = $('dlgWOTask_due');
+        if(note) note.value = '';
+        if(due) due.value = nextMonthISO();
+        const title = $('dlgWOTask_title');
+        if(title) title.textContent = 'Enter New Task';
+        try{ if(typeof dlg.showModal === 'function') dlg.showModal(); else dlg.open = true; }catch(_){ dlg.open = true; }
+      }
+
+      // Guarded binding for Add Task toolbar button
+      const btnAddWOModal = $('btnAddWOModal');
+      if(btnAddWOModal){
+        btnAddWOModal.addEventListener('click', function(e){
+          e.preventDefault();
+          if(!state.link || !state.link.woId){
+            if(window._obsiUX && window._obsiUX.showErr) window._obsiUX.showErr('Select a Work Order first');
+            return;
+          }
+          openWOTaskDialog();
+        });
+      }
+
+      (function wireWOTaskDialog(){
+        const dlg = $('dlgWOTask');
+        if(!dlg) return;
+        const btnSave = $('dlgWOTask_save');
+        const btnCancel = $('dlgWOTask_cancel');
+
+        if(btnCancel){
+          btnCancel.addEventListener('click', function(e){
+            e.preventDefault();
+            try{ window._obsiUX.pulseOk(e.currentTarget); }catch(_){}
+            try{ if(typeof dlg.close === 'function') dlg.close(); else dlg.open = false; }catch(_){ dlg.open = false; }
+            if(window._obsiUX && window._obsiUX.flash) window._obsiUX.flash('Add Task cancelled');
+          });
+        }
+
+        if(btnSave){
+          btnSave.addEventListener('click', async function(){
+            btnSave.disabled = true;
+            try{
+              const noteEl = $('dlgWOTask_note');
+              const dueEl  = $('dlgWOTask_due');
+              const note = noteEl && noteEl.value ? noteEl.value.trim() : '';
+              const due  = dueEl && dueEl.value ? dueEl.value.trim() : '';
+              const woId = state && state.link ? state.link.woId : '';
+              const tid  = state && state.link ? state.link.ticketId : '';
+              if(!woId) throw new Error('Work Order not selected');
+              if(!note) throw new Error('Please enter task details');
+              const perfIso = due || '';
+              await window._obsiCore.gas('addWorkOrderRecord', woId, tid || '', '', note, '', '', perfIso);
+              try{ if(typeof dlg.close === 'function') dlg.close(); else dlg.open = false; }catch(_){ dlg.open = false; }
+              if(window._obsiUX && window._obsiUX.flash) window._obsiUX.flash('Task added');
+              if(window._obsiCore && typeof window._obsiCore.fullRefreshAndRepaint === 'function'){
+                await window._obsiCore.fullRefreshAndRepaint();
+              }else{
+                render();
+                applyVisibility();
+              }
+            }catch(err){
+              showErr(err);
+            } finally{
+              btnSave.disabled = false;
+            }
+          });
+        }
+      })();
+
+      // ------------------------------
+      // Ensure WO selection delegation exists in case render didn't attach
+      // ------------------------------
+      (function ensureWODelegation(){
+        const list = $('woList');
+        if(!list) return;
+        if(list.__selectionHandlerAttached) return;
+        list.addEventListener('click', function(ev){
+          let el = ev.target;
+          while(el && !el.classList.contains('item')) el = el.parentElement;
+          if(!el) return;
+          const wid = el.dataset && el.dataset.woid ? el.dataset.woid : null;
+          if(wid){
+            state.link.woId = S2(wid);
+            const w = (initial.workorders||[]).find(x=>S2(x.WorkOrderID)===S2(wid)) || {};
+            state.link.ticketId = S2(w.TicketID || state.link.ticketId || '');
+          } else {
+            // fallback: not ideal, ignore
+            return;
+          }
+          state.selWORecID = '';
+          state.focus = { ticketId: state.link.ticketId||'', from: 'WO' };
+          list.querySelectorAll('.item').forEach(it=>it.classList.remove('selected'));
+          el.classList.add('selected');
+          try{ if(typeof window._obsiCore.paintWoDetail === 'function'){ const wobj=(initial.workorders||[]).find(x=>S2(x.WorkOrderID)===S2(state.link.woId)); if(wobj) window._obsiCore.paintWoDetail(wobj); } }catch(_){}
+          render();
+          applyVisibility();
+        }, false);
+        list.__selectionHandlerAttached = true;
+      })();
+
+      // Finalize boot: populate pickers and render
+      try{
+        buildClients();
+        buildMarkets();
+        buildCalls();
+        buildEngineers();
+      }catch(e){ /* ignore */ }
+      try{ render(); }catch(e){ /* ignore */ }
+      try{ applyVisibility(); }catch(e){ /* ignore */ }
+      try{ hydrateEntry(); }catch(e){ /* ignore */ }
+
+      ck('diag: boot done');
+
+    } catch (e) {
+      showErr('app_core failure — ' + (e && e.message ? e.message : e));
+      console.error(e);
+    }
+  } // boot()
+
+  // Defer boot until DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
+
+})();
+</script>

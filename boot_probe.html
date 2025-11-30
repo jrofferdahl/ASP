@@ -1,0 +1,78 @@
+<script>
+/** boot_probe.html — Robust readiness probe with retries + global error capture
+ *  - Captures window errors into #errbar
+ *  - Waits up to 3s for _obsiCore to appear (retry every 150ms)
+ *  - Confirms core keys: gas, initial, state, render
+ */
+(function(){
+  function $(id){ return document.getElementById(id); }
+
+  (function wireGlobalErrors(){
+    window.addEventListener('error', function (e) {
+      try {
+        var bar = $('errbar');
+        if (bar) {
+          var msg = e.error && e.error.message ? e.error.message : (e.message || 'Unknown error');
+          bar.textContent = 'Error: ' + msg;
+          bar.className = 'errbar show';
+        }
+      } catch (_) {}
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      try {
+        var bar = $('errbar');
+        if (bar) {
+          var msg = (e.reason && (e.reason.message || String(e.reason))) || 'Unhandled promise rejection';
+          bar.textContent = 'Error: ' + msg;
+          bar.className = 'errbar show';
+        }
+      } catch (_) {}
+    });
+  })();
+
+  function showErr(msg){
+    var bar = $('errbar');
+    if (bar){
+      bar.textContent = 'Error: ' + msg;
+      bar.className = 'errbar show';
+    } else {
+      console.error('Probe error:', msg);
+    }
+  }
+  function flash(msg){
+    var bar = $('notice');
+    if (bar){
+      bar.textContent = msg;
+      bar.className = 'noticebar show';
+      setTimeout(function(){ bar.className = 'noticebar'; }, 1800);
+    } else {
+      console.log('Notice:', msg);
+    }
+  }
+
+  function waitForCore(deadlineMs){
+    var start = Date.now();
+    (function tick(){
+      if (window._obsiCore){
+        var miss = ['gas','initial','state','render'].filter(function(k){ return !_obsiCore[k]; });
+        if (miss.length){ showErr('Core missing: ' + miss.join(', ')); return; }
+        flash('Console ready (probe OK)');
+        return;
+      }
+      if (Date.now() - start > deadlineMs){
+        showErr('_obsiCore not loaded — ensure app_core included (or check console for earlier errors)');
+        return;
+      }
+      setTimeout(tick, 150);
+    })();
+  }
+
+  function start(){ waitForCore(3000); }
+
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', start, { once:true });
+  } else {
+    start();
+  }
+})();
+</script>
