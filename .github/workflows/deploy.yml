@@ -2,8 +2,7 @@ name: Push to Apps Script & Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -13,54 +12,54 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
 
       - name: Install clasp
         run: npm install -g @google/clasp
 
-      - name: Restore CLASPRC to home
+      - name: Restore CLASPRC to home (detect secret)
         env:
+          CLASPRC_JSON_B64: ${{ secrets.CLASPRC_JSON_B64 }}
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
         run: |
-          if [ -z "$CLASPRC_JSON" ]; then
-            echo "Missing CLASPRC_JSON secret; aborting."
+          mkdir -p "$HOME"
+          if [ -n "$CLASPRC_JSON_B64" ]; then
+            echo "$CLASPRC_JSON_B64" | base64 --decode > "$HOME/.clasprc.json"
+            echo "Decoded CLASPRC_JSON_B64 -> ~/.clasprc.json"
+          elif [ -n "$CLASPRC_JSON" ]; then
+            echo "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+            echo "Wrote CLASPRC_JSON -> ~/.clasprc.json"
+          else
+            echo "No CLASPRC secret found (CLASPRC_JSON_B64 or CLASPRC_JSON). Aborting."
             exit 1
           fi
-          mkdir -p "$HOME"
-          echo "$CLASPRC_JSON" > "$HOME/.clasprc.json"
           chmod 600 "$HOME/.clasprc.json"
-          echo "Wrote ~/.clasprc.json (masked)"
+
+      - name: Debug: inspect decoded CLASPRC (keys only, safe)
+        run: |
+          echo "---- debug start ----"
+          stat --format="%n %s bytes" "$HOME/.clasprc.json" || true
+          node -e 'const fs=require("fs"); const p=process.env.HOME+"/.clasprc.json"; try{ const j=JSON.parse(fs.readFileSync(p,"utf8")); console.log("topKeys:",Object.keys(j)); if(j.tokens){ console.log("tokensKeys:",Object.keys(j.tokens)); if(j.tokens.default) console.log("tokens.default keys:",Object.keys(j.tokens.default)); } }catch(e){ console.error("PARSE_ERROR",e.message); process.exit(1)}'
+          echo "---- debug end ----"
 
       - name: Push code to Apps Script
         run: |
-          # Ensure .clasp.json exists and has the scriptId
           if [ ! -f .clasp.json ]; then
             echo ".clasp.json not found. Ensure your project has .clasp.json with scriptId."
             exit 1
           fi
-          # Push the files to Apps Script (force to ensure CI syncs)
           clasp push --force
 
       - name: Create version and deploy
         run: |
-          # Create a version and capture its numeric id
           VERSION_OUTPUT="$(clasp version -m "CI: ${GITHUB_SHA}")"
           echo "version output: $VERSION_OUTPUT"
           VERSION_NUMBER="$(echo "$VERSION_OUTPUT" | awk '{print $NF}')"
-          if ! [[ "$VERSION_NUMBER" =~ ^[0-9]+$ ]]; then
-            echo "Failed to parse version number: $VERSION_OUTPUT"
-            exit 1
-          fi
-          echo "Created version $VERSION_NUMBER"
-          # Deploy using the created version (update existing deployment or create a new one)
-          # If you want a named deployment, change --description accordingly.
           clasp deploy --versionNumber "$VERSION_NUMBER" --description "CI deploy from ${GITHUB_REF}"
 
       - name: Success notice
-        run: echo "Apps Script push, version, and deploy completed."
+        run: echo "Completed."
