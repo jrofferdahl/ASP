@@ -1,62 +1,55 @@
-name: Push to Apps Script & Deploy
-
+name: Deploy Apps Script via clasp
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
-
-      - name: Configure clasp credentials
-        run: |
-          if [ -z "${{ secrets.CLASPRC_JSON }}" ]; then
-            echo "Missing CLASPRC_JSON secret; aborting."
-            exit 1
-          fi
-          mkdir -p "$HOME"
-          # If the secret looks like raw JSON (starts with '{'), write it directly. Otherwise assume base64 and decode.
-          if echo "${{ secrets.CLASPRC_JSON }}" | head -c 1 | grep -q '{'; then
-            printf "%s" "${{ secrets.CLASPRC_JSON }}" > "$HOME/.clasprc.json"
-          else
-            printf "%s" "${{ secrets.CLASPRC_JSON }}" | base64 --decode > "$HOME/.clasprc.json"
-          fi
-          chmod 600 "$HOME/.clasprc.json"
-          echo "Wrote $HOME/.clasprc.json (first 3 lines):"
-          sed -n '1,3p' "$HOME/.clasprc.json" || true
 
       - name: Install clasp
         run: npm install -g @google/clasp
 
-      - name: Validate clasp auth
-        run: |
-          # Run a harmless clasp command to validate that clasp can read the credentials
-          clasp list || true
+      - name: Restore clasp credentials
+        # write the secret into the runner user's home so clasp will pick it up
+        run: printf '%s\n' "${{ secrets.CLASPRC_JSON }}" > $HOME/.clasprc.json
+        shell: bash
 
-      - name: Push code to Apps Script
+      - name: Debug restored credentials (safe: prints only existence and JSON keys)
         run: |
-          if [ ! -f .clasp.json ]; then
-            echo ".clasp.json not found. Ensure your project has .clasp.json with scriptId."
-            exit 1
-          fi
-          clasp push --force
+          echo "HOME=$HOME"
+          echo "File exists: $( [ -f "$HOME/.clasprc.json" ] && echo yes || echo no )"
+          echo "File size (bytes): $( [ -f "$HOME/.clasprc.json" ] && wc -c < "$HOME/.clasprc.json" || echo 0 )"
+          # print only the top-level JSON property names to confirm format (won't reveal secret values)
+          python3 - <<'PY'
+import json,os,sys
+fp = os.path.expanduser("~/.clasprc.json")
+if not os.path.exists(fp):
+    print("JSON file not found")
+    sys.exit(0)
+try:
+    data = json.load(open(fp))
+    print("top-level keys:", list(data.keys()))
+except Exception as e:
+    print("error parsing json:", e)
+PY
+        shell: bash
 
-      - name: Create version and deploy
-        run: |
-          VERSION_OUTPUT="$(clasp version -m "CI: ${GITHUB_SHA}")"
-          echo "version output: $VERSION_OUTPUT"
-          VERSION_NUMBER="$(echo "$VERSION_OUTPUT" | awk '{print $NF}')"
-          clasp deploy --versionNumber "$VERSION_NUMBER" --description "CI deploy from ${GITHUB_REF}"
+      - name: Install dependencies (if any)
+        run: npm ci || true
 
-      - name: Success notice
-        run: echo "Completed."
+      - name: Push to Apps Script
+        # expose the secret as env variable as an alternate credential source
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: clasp push --force
+        shell: bash
