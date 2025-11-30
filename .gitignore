@@ -1,0 +1,20 @@
+# Node/npm
+node_modules/
+npm-debug.log*
+yarn-error.log
+
+# clasp / local credentials
+.clasprc.json
+.clasp.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
