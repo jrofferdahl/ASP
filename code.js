@@ -585,7 +585,13 @@ function composeWorkOrderEmailBundle_(bundle, heading, outro) {
   const t = bundle.parentTicket;
   const recs = bundle.records || [];
 
-  const subject = 'Work Order ' + w.WorkOrderID;
+  const subject = [
+    w.ClientName || '',
+    w.MarketName || '',
+    String(w.CallSign || '').toUpperCase(),
+    w.Priority || 'Not Set',
+    w.Status || 'Not Set'
+  ].join(' / ');
 
   const details = [
     ['Client', w.ClientName],
