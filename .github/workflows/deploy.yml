@@ -31,17 +31,17 @@ jobs:
           echo "File size (bytes): $( [ -f "$HOME/.clasprc.json" ] && wc -c < "$HOME/.clasprc.json" || echo 0 )"
           # print only the top-level JSON property names to confirm format (won't reveal secret values)
           python3 - <<'PY'
-    import json,os,sys
-    fp = os.path.expanduser("~/.clasprc.json")
-    if not os.path.exists(fp):
-        print("JSON file not found")
-        sys.exit(0)
-    try:
-        data = json.load(open(fp))
-        print("top-level keys:", list(data.keys()))
-    except Exception as e:
-        print("error parsing json:", e)
-    PY
+          import json,os,sys
+          fp = os.path.expanduser("~/.clasprc.json")
+          if not os.path.exists(fp):
+              print("JSON file not found")
+              sys.exit(0)
+          try:
+              data = json.load(open(fp))
+              print("top-level keys:", list(data.keys()))
+          except Exception as e:
+              print("error parsing json:", e)
+          PY
         shell: bash
 
       - name: Install dependencies (if any)
