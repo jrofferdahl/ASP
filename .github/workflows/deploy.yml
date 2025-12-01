@@ -26,6 +26,8 @@ jobs:
         run: |
           # write the secret from the environment variable into the file safely
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          # If your secret is base64-encoded, instead use:
+          # echo "$CLASPRC_JSON" | base64 --decode > "$HOME/.clasprc.json"
           chmod 600 "$HOME/.clasprc.json"
           ls -l "$HOME/.clasprc.json"
           wc -c "$HOME/.clasprc.json"
@@ -34,8 +36,8 @@ jobs:
       - name: "Debug restored credentials (safe: prints only existence and JSON keys)"
         run: |
           echo "HOME=$HOME"
-          echo "File exists: $( [ -f "$HOME/.clasprc.json" ] && echo yes || echo no )"
-          echo "File size (bytes): $( [ -f "$HOME/.clasprc.json" ] && wc -c < "$HOME/.clasprc.json" || echo 0 )"
+          echo "File exists: $( [ -f \"$HOME/.clasprc.json\" ] && echo yes || echo no )"
+          echo "File size (bytes): $( [ -f \"$HOME/.clasprc.json\" ] && wc -c < \"$HOME/.clasprc.json\" || echo 0 )"
           # print only the top-level JSON property names to confirm format (won't reveal secret values)
           python3 - <<'PY'
           import json, os, sys
@@ -44,7 +46,8 @@ jobs:
               print("JSON file not found")
               sys.exit(0)
           try:
-              data = json.load(open(fp))
+              with open(fp) as f:
+                  data = json.load(f)
               print("top-level keys:", list(data.keys()))
           except Exception as e:
               print("error parsing json:", e)
@@ -55,7 +58,6 @@ jobs:
         run: npm ci || true
 
       - name: Push to Apps Script
-        # ensure HOME is set so clasp looks in the same place we wrote the file
         env:
           HOME: /home/runner
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
@@ -63,6 +65,8 @@ jobs:
           echo "Using HOME=$HOME; listing ~/.clasprc.json"
           ls -l "$HOME/.clasprc.json" || true
           clasp --version || true
-          # run clasp with debug/verbose to get more output if it still fails
-          clasp push --force --verbose
+          # show which account (if any) clasp is logged in as
+          clasp whoami || echo "clasp not logged in or credentials invalid"
+          # push (no --verbose flag; clasp doesn't support it)
+          clasp push --force
         shell: bash
