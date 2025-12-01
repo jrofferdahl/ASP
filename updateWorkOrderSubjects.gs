@@ -62,7 +62,12 @@ function processWorkOrderEmails() {
 
         if (SEND_FORWARD) {
           // Forward automatically to original "To" recipients
-          const originalTo = message.getTo() || message.getFrom();
+          const originalTo = message.getTo();
+          if (!originalTo) {
+            Logger.log('Skipping messageId=%s: no "To" recipients found for forwarding', messageId);
+            markProcessed(messageId);
+            continue;
+          }
           Logger.log('Forwarding messageId=%s to=%s newSubject=%s', messageId, originalTo, newSubject);
           // forward(recipient, options) sends immediately
           message.forward(originalTo, { htmlBody: bodyHtml, subject: newSubject });
@@ -88,16 +93,20 @@ function processWorkOrderEmails() {
   Logger.log('Processing complete.');
 }
 
-/* Helper: create a simple HTML body that preserves the original message with a header */
+/* Helper: create a simple HTML body that preserves the original message with a header.
+ * For security, we escape the original email body content using the escapeHtml function
+ * to prevent potential XSS or HTML injection in the draft/forwarded message.
+ */
 function buildForwardHtmlBody(message) {
   const from = message.getFrom() || '';
   const date = message.getDate() ? message.getDate().toString() : '';
   const subject = message.getSubject() || '';
-  const originalHtml = message.getBody() || '';
+  // Use plain body and escape it for safer HTML output
+  const originalBody = message.getPlainBody() || '';
   // Include original metadata and message in the draft/forward html
   return '<p><strong>Original message</strong></p>'
     + `<p>From: ${escapeHtml(from)}<br/>Date: ${escapeHtml(date)}<br/>Subject: ${escapeHtml(subject)}</p>`
-    + '<hr/>' + originalHtml;
+    + '<hr/><pre style="white-space: pre-wrap; font-family: inherit;">' + escapeHtml(originalBody) + '</pre>';
 }
 
 /* Helper: basic HTML escape */
@@ -147,7 +156,7 @@ function extractSingleAddress(fromHeader) {
 function clearProcessedMarkers() {
   const props = PropertiesService.getScriptProperties();
   const all = props.getProperties();
-  const keys = Object.keys(all).filter(k => k.indexOf('processed_') === 0);
+  const keys = Object.keys(all).filter(k => k.startsWith('processed_'));
   for (const k of keys) props.deleteProperty(k);
   Logger.log('Cleared %s processed markers', keys.length);
 }
