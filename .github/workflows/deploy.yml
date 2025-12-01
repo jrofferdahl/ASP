@@ -20,13 +20,12 @@ jobs:
         run: npm install -g @google/clasp
 
       - name: Restore clasp credentials to $HOME/.clasprc.json
-        # write the secret into the runner user's home so clasp will pick it up
+        # bind the secret into the step environment (safe — Actions writes it to the runner env file)
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
         run: |
-          # If you stored the JSON directly as the secret, this writes it to the file.
-          # If you stored a base64-encoded JSON, uncomment the base64 decode line below and comment out the printf line.
-          printf '%s\n' "${{ secrets.CLASPRC_JSON }}" > "$HOME/.clasprc.json"
-          # If your secret is base64-encoded, use:
-          # echo "${{ secrets.CLASPRC_JSON }}" | base64 --decode > "$HOME/.clasprc.json"
+          # write the secret from the environment variable into the file safely
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
           chmod 600 "$HOME/.clasprc.json"
           ls -l "$HOME/.clasprc.json"
           wc -c "$HOME/.clasprc.json"
@@ -59,7 +58,6 @@ jobs:
         # ensure HOME is set so clasp looks in the same place we wrote the file
         env:
           HOME: /home/runner
-          # optional: also expose the secret to clasp as an env var (clasp supports CLASPRC_JSON)
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
         run: |
           echo "Using HOME=$HOME; listing ~/.clasprc.json"
