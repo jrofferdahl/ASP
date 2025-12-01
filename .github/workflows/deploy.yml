@@ -19,37 +19,52 @@ jobs:
       - name: Install clasp
         run: npm install -g @google/clasp
 
-      - name: Restore clasp credentials
+      - name: Restore clasp credentials to $HOME/.clasprc.json
         # write the secret into the runner user's home so clasp will pick it up
-        run: printf '%s\n' "${{ secrets.CLASPRC_JSON }}" > $HOME/.clasprc.json
+        run: |
+          # If you stored the JSON directly as the secret, this writes it to the file.
+          # If you stored a base64-encoded JSON, uncomment the base64 decode line below and comment out the printf line.
+          printf '%s\n' "${{ secrets.CLASPRC_JSON }}" > "$HOME/.clasprc.json"
+          # If your secret is base64-encoded, use:
+          # echo "${{ secrets.CLASPRC_JSON }}" | base64 --decode > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+          ls -l "$HOME/.clasprc.json"
+          wc -c "$HOME/.clasprc.json"
         shell: bash
 
-      - name: "Debug restored credentials (safe: prints only existence and JSON keys)"
+      - name: Debug restored credentials (safe: prints only existence and JSON keys)
         run: |
           echo "HOME=$HOME"
           echo "File exists: $( [ -f "$HOME/.clasprc.json" ] && echo yes || echo no )"
           echo "File size (bytes): $( [ -f "$HOME/.clasprc.json" ] && wc -c < "$HOME/.clasprc.json" || echo 0 )"
           # print only the top-level JSON property names to confirm format (won't reveal secret values)
           python3 - <<'PY'
-          import json,os,sys
-          fp = os.path.expanduser("~/.clasprc.json")
-          if not os.path.exists(fp):
-              print("JSON file not found")
-              sys.exit(0)
-          try:
-              data = json.load(open(fp))
-              print("top-level keys:", list(data.keys()))
-          except Exception as e:
-              print("error parsing json:", e)
-          PY
+import json, os, sys
+fp = os.path.expanduser("~/.clasprc.json")
+if not os.path.exists(fp):
+    print("JSON file not found")
+    sys.exit(0)
+try:
+    data = json.load(open(fp))
+    print("top-level keys:", list(data.keys()))
+except Exception as e:
+    print("error parsing json:", e)
+PY
         shell: bash
 
       - name: Install dependencies (if any)
         run: npm ci || true
 
       - name: Push to Apps Script
-        # expose the secret as env variable as an alternate credential source
+        # ensure HOME is set so clasp looks in the same place we wrote the file
         env:
+          HOME: /home/runner
+          # optional: also expose the secret to clasp as an env var (clasp supports CLASPRC_JSON)
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
-        run: clasp push --force
+        run: |
+          echo "Using HOME=$HOME; listing ~/.clasprc.json"
+          ls -l "$HOME/.clasprc.json" || true
+          clasp --version || true
+          # run clasp with debug/verbose to get more output if it still fails
+          clasp push --force --verbose
         shell: bash
