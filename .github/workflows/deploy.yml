@@ -32,7 +32,7 @@ jobs:
           wc -c "$HOME/.clasprc.json"
         shell: bash
 
-      - name: Debug restored credentials (safe: prints only existence and JSON keys)
+      - name: "Debug restored credentials (safe: prints only existence and JSON keys)"
         run: |
           echo "HOME=$HOME"
           echo "File exists: $( [ -f "$HOME/.clasprc.json" ] && echo yes || echo no )"
