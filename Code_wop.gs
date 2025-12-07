@@ -2,7 +2,8 @@
 // This script provides a Web App API for the Work Order Portal
 // DO NOT modify the main ASP application files
 
-// Configuration - Update this with your Apps Script Web App URL after deployment
+// Configuration - IMPORTANT: Update this with your Apps Script Web App URL after deployment
+// This placeholder must be replaced before the app will function correctly
 const APPS_SCRIPT_URL = 'YOUR_WEB_APP_URL_HERE';
 
 // Spreadsheet ID - Update with your Google Sheets ID

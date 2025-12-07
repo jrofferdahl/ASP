@@ -135,7 +135,7 @@ The Apps Script will automatically create the required sheets and columns:
 ### Test 7: UI Verification
 
 1. **Appbar:**
-   - Title: "OBSI WORK ORDER PROTAL" (center-justified)
+   - Title: "OBSI WORK ORDER PORTAL" (center-justified)
    - Left side: "© 2025 OBSI"
    - Right side: Build label
 2. **No debug panel visible**

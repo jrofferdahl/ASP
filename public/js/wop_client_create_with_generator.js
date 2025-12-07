@@ -164,12 +164,12 @@
       const datePart = parts[1]; // YYYYMMDD
       const timePart = parts[2]; // HHMMSS
       
-      const year = parseInt(datePart.substr(0, 4), 10);
-      const month = parseInt(datePart.substr(4, 2), 10) - 1; // JS months are 0-indexed
-      const day = parseInt(datePart.substr(6, 2), 10);
-      const hours = parseInt(timePart.substr(0, 2), 10);
-      const minutes = parseInt(timePart.substr(2, 2), 10);
-      const seconds = parseInt(timePart.substr(4, 2), 10);
+      const year = parseInt(datePart.substring(0, 4), 10);
+      const month = parseInt(datePart.substring(4, 6), 10) - 1; // JS months are 0-indexed
+      const day = parseInt(datePart.substring(6, 8), 10);
+      const hours = parseInt(timePart.substring(0, 2), 10);
+      const minutes = parseInt(timePart.substring(2, 4), 10);
+      const seconds = parseInt(timePart.substring(4, 6), 10);
       
       return new Date(Date.UTC(year, month, day, hours, minutes, seconds));
     } catch (error) {
