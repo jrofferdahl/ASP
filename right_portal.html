@@ -1,0 +1,324 @@
+<!-- Right Portal for Work Order Details and Actions -->
+<div class="panel">
+  <h2 class="panel-title">Work Order Details</h2>
+  <div id="woDetailsContent">
+    <div class="meta">Select a work order to view details</div>
+  </div>
+  
+  <!-- Action Buttons -->
+  <div id="woActions" style="display: none; margin-top: 1.5rem; gap: 0.5rem; flex-wrap: wrap;">
+    <button class="btn" onclick="openAssignEngineerDialog()">Assign Engineer</button>
+    <button class="btn" onclick="openScheduleDialog()">Schedule</button>
+  </div>
+</div>
+
+<!-- Assign Engineer Dialog -->
+<div id="assignEngineerDialog" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+  <div style="background: white; border-radius: 0.5rem; padding: 1.5rem; max-width: 500px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+    <h3 style="margin-bottom: 1rem; font-size: 1.125rem; font-weight: 600;">Assign Engineer</h3>
+    
+    <div class="field">
+      <label for="engineerSelect">Engineer</label>
+      <select id="engineerSelect">
+        <option value="">Select an engineer...</option>
+      </select>
+    </div>
+    
+    <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.5rem;">
+      <button class="btn-ghost" onclick="closeAssignEngineerDialog()">Cancel</button>
+      <button class="btn" onclick="submitAssignEngineer()">Assign</button>
+    </div>
+  </div>
+</div>
+
+<!-- Schedule Dialog -->
+<div id="scheduleDialog" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+  <div style="background: white; border-radius: 0.5rem; padding: 1.5rem; max-width: 500px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+    <h3 style="margin-bottom: 1rem; font-size: 1.125rem; font-weight: 600;">Schedule Work Order</h3>
+    
+    <div class="field">
+      <label for="scheduleDateInput">Schedule Date</label>
+      <input type="date" id="scheduleDateInput" />
+    </div>
+    
+    <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.5rem;">
+      <button class="btn-ghost" onclick="closeScheduleDialog()">Cancel</button>
+      <button class="btn" onclick="submitSchedule()">Schedule</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  /**
+   * Update the right portal with work order details
+   */
+  function updateRightPortal(wo) {
+    const content = document.getElementById('woDetailsContent');
+    const actions = document.getElementById('woActions');
+    
+    if (!wo) {
+      content.innerHTML = '<div class="meta">Select a work order to view details</div>';
+      actions.style.display = 'none';
+      return;
+    }
+    
+    content.innerHTML = `
+      <div class="field">
+        <label>Work Order ID</label>
+        <div style="font-weight: 600;">${wo.WorkOrderID || 'N/A'}</div>
+      </div>
+      
+      <div class="field">
+        <label>Description</label>
+        <div>${wo.WorkOrderText || 'No description'}</div>
+      </div>
+      
+      ${wo.EngineerID ? `
+        <div class="field">
+          <label>Assigned Engineer</label>
+          <div>${wo.EngineerName || wo.EngineerID}</div>
+        </div>
+      ` : ''}
+      
+      ${wo.ScheduledDate ? `
+        <div class="field">
+          <label>Scheduled Date</label>
+          <div>${wo.ScheduledDate}</div>
+        </div>
+      ` : ''}
+      
+      ${wo.CreatedUTC ? `
+        <div class="field">
+          <label>Created</label>
+          <div class="meta">${wo.CreatedUTC}</div>
+        </div>
+      ` : ''}
+    `;
+    
+    actions.style.display = 'flex';
+  }
+  
+  window.updateRightPortal = updateRightPortal;
+
+  /**
+   * Load engineers from server
+   */
+  async function loadEngineers() {
+    try {
+      // Try coreGas first
+      if (typeof coreGas === 'function') {
+        return await coreGas('getEngineers');
+      }
+      
+      // Try Google Apps Script
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        return new Promise((resolve, reject) => {
+          google.script.run
+            .withSuccessHandler(resolve)
+            .withFailureHandler(reject)
+            .getEngineers();
+        });
+      }
+      
+      // Fallback to __INITIAL__ payload if available
+      if (window.__INITIAL__ && window.__INITIAL__.engineers) {
+        return window.__INITIAL__.engineers;
+      }
+      
+      // Fallback to Web App endpoint
+      const response = await fetch(window.APPS_SCRIPT_URL + '?op=getEngineers');
+      const data = await response.json();
+      return data.engineers || [];
+    } catch (error) {
+      console.error('Error loading engineers:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Open assign engineer dialog
+   */
+  async function openAssignEngineerDialog() {
+    const dialog = document.getElementById('assignEngineerDialog');
+    const select = document.getElementById('engineerSelect');
+    
+    // Load engineers
+    const engineers = await loadEngineers();
+    
+    // Populate select
+    select.innerHTML = '<option value="">Select an engineer...</option>' + 
+      engineers.map(eng => `
+        <option value="${eng.EngineerID}">${eng.EngineerName || eng.EngineerID}</option>
+      `).join('');
+    
+    dialog.style.display = 'flex';
+  }
+  
+  window.openAssignEngineerDialog = openAssignEngineerDialog;
+
+  /**
+   * Close assign engineer dialog
+   */
+  function closeAssignEngineerDialog() {
+    document.getElementById('assignEngineerDialog').style.display = 'none';
+  }
+  
+  window.closeAssignEngineerDialog = closeAssignEngineerDialog;
+
+  /**
+   * Submit engineer assignment
+   */
+  async function submitAssignEngineer() {
+    const select = document.getElementById('engineerSelect');
+    const engineerId = select.value;
+    const engineerName = select.options[select.selectedIndex].text;
+    
+    if (!engineerId) {
+      alert('Please select an engineer');
+      return;
+    }
+    
+    if (!window.currentWO || !window.currentWO.WorkOrderID) {
+      alert('No work order selected');
+      return;
+    }
+    
+    try {
+      const payload = {
+        action: 'assignEngineer',
+        workOrderId: window.currentWO.WorkOrderID,
+        engineerId: engineerId,
+        engineerName: engineerName
+      };
+      
+      // Try coreGas first
+      if (typeof coreGas === 'function') {
+        await coreGas('assignEngineer', payload);
+      } else if (typeof google !== 'undefined' && google.script && google.script.run) {
+        await new Promise((resolve, reject) => {
+          google.script.run
+            .withSuccessHandler(resolve)
+            .withFailureHandler(reject)
+            .assignEngineer(payload);
+        });
+      } else {
+        // Fallback to Web App endpoint
+        const response = await fetch(window.APPS_SCRIPT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.error || 'Assignment failed');
+      }
+      
+      // Update local WO
+      window.currentWO.EngineerID = engineerId;
+      window.currentWO.EngineerName = engineerName;
+      
+      // Update UI
+      updateRightPortal(window.currentWO);
+      if (typeof window.renderWorkOrders === 'function') {
+        window.renderWorkOrders(window.workOrders);
+      }
+      
+      closeAssignEngineerDialog();
+      alert('Engineer assigned successfully');
+    } catch (error) {
+      alert('Error assigning engineer: ' + (error.message || error));
+    }
+  }
+  
+  window.submitAssignEngineer = submitAssignEngineer;
+
+  /**
+   * Open schedule dialog
+   */
+  function openScheduleDialog() {
+    const dialog = document.getElementById('scheduleDialog');
+    const input = document.getElementById('scheduleDateInput');
+    
+    // Set default to current WO's scheduled date if available
+    if (window.currentWO && window.currentWO.ScheduledDate) {
+      input.value = window.currentWO.ScheduledDate;
+    } else {
+      // Default to tomorrow
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      input.value = tomorrow.toISOString().split('T')[0];
+    }
+    
+    dialog.style.display = 'flex';
+  }
+  
+  window.openScheduleDialog = openScheduleDialog;
+
+  /**
+   * Close schedule dialog
+   */
+  function closeScheduleDialog() {
+    document.getElementById('scheduleDialog').style.display = 'none';
+  }
+  
+  window.closeScheduleDialog = closeScheduleDialog;
+
+  /**
+   * Submit schedule
+   */
+  async function submitSchedule() {
+    const input = document.getElementById('scheduleDateInput');
+    const scheduleDate = input.value;
+    
+    if (!scheduleDate) {
+      alert('Please select a date');
+      return;
+    }
+    
+    if (!window.currentWO || !window.currentWO.WorkOrderID) {
+      alert('No work order selected');
+      return;
+    }
+    
+    try {
+      const payload = {
+        action: 'scheduleWorkOrder',
+        workOrderId: window.currentWO.WorkOrderID,
+        scheduleDate: scheduleDate
+      };
+      
+      // Try coreGas first
+      if (typeof coreGas === 'function') {
+        await coreGas('scheduleWorkOrder', payload);
+      } else if (typeof google !== 'undefined' && google.script && google.script.run) {
+        await new Promise((resolve, reject) => {
+          google.script.run
+            .withSuccessHandler(resolve)
+            .withFailureHandler(reject)
+            .scheduleWorkOrder(payload);
+        });
+      } else {
+        // Fallback to Web App endpoint
+        const response = await fetch(window.APPS_SCRIPT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.error || 'Scheduling failed');
+      }
+      
+      // Update local WO
+      window.currentWO.ScheduledDate = scheduleDate;
+      
+      // Update UI
+      updateRightPortal(window.currentWO);
+      
+      closeScheduleDialog();
+      alert('Work order scheduled successfully');
+    } catch (error) {
+      alert('Error scheduling work order: ' + (error.message || error));
+    }
+  }
+  
+  window.submitSchedule = submitSchedule;
+</script>
