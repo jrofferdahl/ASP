@@ -20,7 +20,6 @@ jobs:
         run: npm install -g @google/clasp
 
       - name: Restore clasp credentials to $HOME/.clasprc.json
-        # bind the secret into the step environment (safe — Actions writes it to the runner env file)
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
         run: |
@@ -33,12 +32,11 @@ jobs:
           wc -c "$HOME/.clasprc.json"
         shell: bash
 
-      - name: "Debug restored credentials (safe: prints only existence and JSON keys)"
+      - name: "Debug restored credentials (safe: checks for token keys without printing secrets)"
         run: |
           echo "HOME=$HOME"
           echo "File exists: $( [ -f \"$HOME/.clasprc.json\" ] && echo yes || echo no )"
           echo "File size (bytes): $( [ -f \"$HOME/.clasprc.json\" ] && wc -c < \"$HOME/.clasprc.json\" || echo 0 )"
-          # print only the top-level JSON property names to confirm format (won't reveal secret values)
           python3 - <<'PY'
           import json, os, sys
           fp = os.path.expanduser("~/.clasprc.json")
@@ -46,11 +44,30 @@ jobs:
               print("JSON file not found")
               sys.exit(0)
           try:
-              with open(fp) as f:
+              with open(fp, 'r') as f:
                   data = json.load(f)
-              print("top-level keys:", list(data.keys()))
           except Exception as e:
               print("error parsing json:", e)
+              sys.exit(0)
+
+          def find_keys(obj, key):
+              if isinstance(obj, dict):
+                  for k, v in obj.items():
+                      if k == key:
+                          return True
+                      if find_keys(v, key):
+                          return True
+              elif isinstance(obj, list):
+                  for item in obj:
+                      if find_keys(item, key):
+                          return True
+              return False
+
+          has_access_token = find_keys(data, 'access_token')
+          has_refresh_token = find_keys(data, 'refresh_token')
+          print('has_access_token:', has_access_token)
+          print('has_refresh_token:', has_refresh_token)
+          print('top-level keys:', list(data.keys()))
           PY
         shell: bash
 
@@ -65,8 +82,6 @@ jobs:
           echo "Using HOME=$HOME; listing ~/.clasprc.json"
           ls -l "$HOME/.clasprc.json" || true
           clasp --version || true
-          # show which account (if any) clasp is logged in as
-          clasp whoami || echo "clasp not logged in or credentials invalid"
-          # push (no --verbose flag; clasp doesn't support it)
+          # clasp whoami not available in this clasp version; rely on the JSON checks above
           clasp push --force
         shell: bash
